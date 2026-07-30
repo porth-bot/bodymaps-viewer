@@ -1,10 +1,6 @@
 /**
- * Small DOM control factories.
- *
- * These exist so the panel code reads as a description of the UI rather than a
- * wall of createElement calls. Each returns both the element and an `update`
- * so a control can be driven from state without the panel tracking references
- * by hand.
+ * Small DOM control factories. Each returns the element plus an `update`, so a
+ * panel can drive a control from state without tracking references by hand.
  */
 
 export function el<K extends keyof HTMLElementTagNameMap>(
@@ -24,11 +20,9 @@ export interface Control<T> {
 }
 
 /**
- * Unique ids so every `<label>` can point at the control it names.
- *
- * Without the association a screen reader reads the sliders and selects as
- * unlabelled, and clicking the visible text does not focus the control, which
- * everyone expects to work.
+ * Unique ids so every `<label>` can point at the control it names. Without the
+ * association a screen reader reads the sliders and selects as unlabelled, and
+ * clicking the visible text does not focus the control.
  */
 let controlSeq = 0;
 const nextId = (prefix: string) => `${prefix}-${++controlSeq}`;

@@ -1,53 +1,21 @@
 /**
  * Names and colours for the anatomical structures the viewer can overlay.
  *
- * Colour source
- * -------------
- * The base is 3D Slicer's GenericAnatomyColors table
- * (Slicer/Base/Logic/Resources/ColorFiles/GenericAnatomyColors.txt), which is
- * also what backs the SlicerTotalSegmentator terminology file
- * (lassoan/SlicerTotalSegmentator, Resources/SegmentationCategoryTypeModifier-TotalSegmentator.term.json).
- * TotalSegmentator itself ships no colour table; its published colours are the
- * ones that terminology mapping resolves to, so those two files together are
- * "the TotalSegmentator LUT" in practice. Key spellings follow TotalSegmentator
- * v2 (wasserth/TotalSegmentator, totalsegmentator/map_to_binary.py) except for
- * the nine structures in the sample study, which keep their AbdomenAtlas names
- * (MrGiovanni/AbdomenAtlas) since that is what the files on disk are called.
+ * Colours follow 3D Slicer's GenericAnatomyColors wherever it has an entry,
+ * which is also what the SlicerTotalSegmentator terminology resolves to
+ * (TotalSegmentator ships no colour table of its own). Keys follow
+ * TotalSegmentator v2, except the nine structures in the sample study, which
+ * keep their AbdomenAtlas names, since that is what the files on disk are called.
  *
- * Where we depart from the LUT, and why
- * ------------------------------------
- * GenericAnatomyColors is tuned for realistic 3D surface renders, not for flat
- * 2D overlays, and it has three properties that make it unusable verbatim:
+ * Slicer's table is built for 3D surface renders: both kidneys get one colour,
+ * all twelve thoracic vertebrae another, the abdominal viscera one salmon wedge.
+ * Entries marked RETUNED depart from it, with the value they replace, and stay
+ * in the family a reader expects (bone osseous, arteries red, veins blue).
  *
- *   1. Bilateral pairs share one colour. Both kidneys are 185,102,83; every rib
- *      is 253,232,158. A viewer that has to tell left from right cannot use
- *      that, so the contralateral side takes a lightness step (see
- *      `contralateral`).
- *   2. A whole tissue class is often one colour. All twelve thoracic vertebrae
- *      are 226,202,134; the myocardium and all four cardiac chambers sit inside
- *      dE 5 of each other. Members of a series are spread along a ramp (see
- *      `seriesShade`) and crowded groups are given an explicit ladder.
- *   3. The abdominal viscera are all one warm salmon family. Slicer's liver
- *      (221,130,101) and stomach (216,132,105) are CIE76 dE 3.7 apart, roughly
- *      one and a half just-noticeable differences, and the kidneys sit inside
- *      the same wedge as liver and aorta.
- *
- * Every departure keeps the structure inside a colour family a reader would
- * expect (bone stays osseous, arteries stay red, veins stay blue) and is marked
- * RETUNED below with the LUT value it replaces. After the retune the tightest
- * pair among the nine sample structures is Slicer's own liver/aorta at dE 18.2,
- * so no departure of ours is the limiting factor there.
- *
- * Separation is scoped to structures that can share a slice. Across the whole
- * 132-entry table the closest pair is dE 2.8, ribs 1 and 3 of the right side,
- * two rungs of one ramp with rib 2 between them; the closest pair naming two
- * different structures is dE 3.1 (T12 against a right rib) and the closest pair
- * outside the series ramps is dE 3.4 (clavicle against hip bone). Those floors
- * are deliberate: fifty bones share one ivory wedge, and chasing global
- * separation pushes bone off ivory and muscle off red. A reader notices a
- * lime-green rib far faster than two similar tans two ribs apart.
- * `tests/anatomy.test.ts` pins all three numbers, so a retune that lowers them
- * fails the suite instead of making this paragraph quietly wrong.
+ * Separation is only enforced between structures that can share a slice, so the
+ * closest pair in the table is deliberately tight, two rungs of one rib ramp.
+ * Chasing global separation pushes bone off ivory and muscle off red.
+ * `tests/anatomy.test.ts` pins the measured distances.
  */
 
 export interface AnatomyEntry {
@@ -60,9 +28,9 @@ type RGB = [number, number, number];
 type Def = readonly [key: string, name: string, color: RGB];
 
 /**
- * Lightness step applied to the right side of a bilateral pair. It normally
- * darkens, but a colour that is already dark would sink into the CT background
- * and read as a hole rather than a label, so those get lightened instead.
+ * Lightness step for the right side of a bilateral pair. Normally darkens, but
+ * an already dark colour sinks into the CT background and reads as a hole, so
+ * those lighten instead.
  */
 const CONTRALATERAL_STEP = 0.28;
 const CONTRALATERAL_FLOOR = 110;
@@ -94,51 +62,40 @@ function pair(stem: string, name: string, left: RGB, right?: RGB): Def[] {
 }
 
 // --- vertebrae and ribs ----------------------------------------------------
-// These are long uniform series in the LUT: every cervical vertebra is one
-// ivory, every rib another. A sagittal slice shows a whole series at once, so
-// each member gets its own rung of a ramp rather than one of two alternating
-// shades, which would put six identical vertebrae on screen together.
+// Long uniform series in the LUT: every cervical vertebra is one ivory, every
+// rib another. A sagittal slice shows a whole series at once, so each member
+// gets a rung of its own. Two alternating shades would put six identical
+// vertebrae on screen together.
 
-/**
- * The two ends of a series ramp: the LUT colour, and the shade the last member
- * reaches. The far end is darker and a little cooler, which is about as far as
- * a ramp can travel and still read as bone, and it is long enough that twelve
- * rungs stay apart. A single alternating step cannot do that job: it puts six
- * identical vertebrae on one sagittal slice.
- */
+/** The two ends of a series ramp: the LUT colour, and where the last member lands. */
 type Ramp = readonly [from: RGB, to?: RGB];
 
-/** Colour for member `n` (0-based) of a `count`-long series. */
 function seriesShade(ramp: Ramp, n: number, count: number): RGB {
   const from = ramp[0];
   const to = ramp[1] ?? from;
-  // Copied rather than handed back, so freezing the entry cannot freeze the
-  // literal this ramp was declared with.
+  // Copied, so freezing the entry cannot freeze the ramp literal.
   if (count < 2) return [from[0], from[1], from[2]];
   const t = rampPosition(n, count) / (count - 1);
   return [mixByte(from[0], to[0], t), mixByte(from[1], to[1], t), mixByte(from[2], to[2], t)];
 }
 
 /**
- * Which rung member `n` occupies. The ramp is walked in two passes, even
- * members then odd ones, so T7 and T8 land half a ramp apart while every member
- * still gets a rung to itself. Walking it in order would instead put the
- * smallest step exactly where it matters most, between two vertebrae that touch.
+ * Which rung member `n` occupies. Two passes, even members then odd, so T7 and
+ * T8 land half a ramp apart. In order, the smallest step would fall exactly
+ * where it matters most, between two vertebrae that touch.
  */
 function rampPosition(n: number, count: number): number {
   const half = Math.ceil(count / 2);
   return n % 2 === 0 ? n / 2 : half + (n - 1) / 2;
 }
 
-// Ramp ends were picked by maximising the smallest colour distance across the
-// whole table under the constraint that both ends stay osseous, since the
-// spine, the ribs and the girdles all crowd the same ivory wedge.
+// Ramp ends maximise the smallest colour distance across the table with both
+// ends held osseous: spine, ribs and girdles all crowd the same ivory wedge.
 const VERTEBRA_REGIONS: ReadonlyArray<readonly [prefix: string, count: number, ramp: Ramp]> = [
   ['C', 7, [[255, 255, 207], [190, 190, 154]]], // Slicer cervical_vertebral_column
   ['T', 12, [[226, 202, 134], [146, 130, 106]]], // Slicer thoracic_vertebral_column
   ['L', 5, [[212, 188, 102], [157, 139, 76]]], // Slicer lumbar_vertebral_column
-  // One vertebra, so there is nothing to ramp across.
-  ['S', 1, [[212, 208, 122]]], // SlicerTotalSegmentator, S1 vertebra
+  ['S', 1, [[212, 208, 122]]], // SlicerTotalSegmentator S1, nothing to ramp across
 ];
 
 function vertebraDefs(): Def[] {
@@ -152,19 +109,16 @@ function vertebraDefs(): Def[] {
   return out;
 }
 
-// RETUNED, warmed a shade off Slicer's 253,232,158 so that the ramp it starts
-// clears the thoracic vertebrae the ribs sit beside.
+// RETUNED, warmed off Slicer's 253,232,158 so the ramp clears the thoracic
+// vertebrae the ribs sit beside.
 const RIB_RAMP: Ramp = [
   [252, 222, 176],
   [166, 138, 126],
 ];
 
-/**
- * The right side starts where `contralateral` puts it but is given its own far
- * end. Taking a lightness step off a ramp that is already descending would
- * leave the twelve right ribs sharing about half the room the left twelve get,
- * and the closest of them would fall under a just-noticeable difference.
- */
+// Right side starts where `contralateral` puts it but needs its own far end:
+// stepping the lightness of an already descending ramp leaves the twelve right
+// ribs about half the room the left twelve get.
 const RIB_RAMP_RIGHT: Ramp = [contralateral(RIB_RAMP[0]), [108, 90, 90]];
 
 const RIBS_PER_SIDE = 12;
@@ -191,12 +145,11 @@ const DEFS: readonly Def[] = [
   ['liver', 'Liver', [221, 130, 101]], // Slicer liver
   ['spleen', 'Spleen', [157, 108, 162]], // Slicer spleen
   ['pancreas', 'Pancreas', [249, 180, 111]], // Slicer pancreas
-  // RETUNED, Slicer stomach 216,132,105 is dE 3.7 from liver and the two share
-  // a border on every upper abdominal slice.
+  // RETUNED, Slicer stomach 216,132,105 is dE 3.7 from liver and the two share a
+  // border on every upper abdominal slice.
   ['stomach', 'Stomach', [120, 190, 170]],
   ['gall_bladder', 'Gallbladder', [139, 150, 98]], // Slicer gallbladder
-  // RETUNED, Slicer duodenum 255,253,229 is near-white and disappears against
-  // bone and contrast.
+  // RETUNED, Slicer duodenum 255,253,229 is near-white against bone and contrast.
   ['duodenum', 'Duodenum', [245, 205, 175]],
   ['small_bowel', 'Small bowel', [205, 167, 142]], // Slicer small_bowel
   // RETUNED, Slicer colon 204,168,143 is dE 1 from small bowel.
@@ -206,50 +159,47 @@ const DEFS: readonly Def[] = [
   ['esophagus', 'Oesophagus', [226, 122, 168]],
 
   // Urinary tract and pelvis.
-  // RETUNED pair. Slicer gives both kidneys 185,102,83, which collides with
-  // liver and aorta; the right kidney abuts the liver on most axial slices.
+  // RETUNED pair. Slicer gives both kidneys 185,102,83, which collides with liver
+  // and aorta, and the right kidney abuts the liver on most axial slices.
   ...pair('kidney', 'Kidney', [165, 74, 58], [112, 46, 40]),
   ...pair('kidney_cyst', 'Kidney cyst', [205, 205, 100]), // Slicer cyst
-  // RETUNED, Slicer's pale peach 249,186,150 lands on the psoas the glands sit
-  // against at T12, and these are small structures that need to carry.
+  // RETUNED, Slicer's pale peach 249,186,150 lands on the psoas these sit against
+  // at T12, and they are small enough to need the contrast.
   ...pair('adrenal_gland', 'Adrenal gland', [252, 208, 78]),
   ['urinary_bladder', 'Urinary bladder', [222, 154, 132]], // Slicer urinary_bladder
-  // RETUNED, Slicer prostate 230,158,140 is dE 3 from urinary bladder and sits
-  // directly beneath it.
+  // RETUNED, Slicer prostate 230,158,140 is dE 3 from the bladder above it.
   ['prostate', 'Prostate', [188, 120, 152]],
-  // RETUNED from 247,182,164, which lands on the psoas and glutes the ureters
-  // run over; the right side is given explicitly so it clears the prostate.
+  // RETUNED from 247,182,164, which lands on the psoas and glutes the ureters run
+  // over. Right side explicit so it also clears the prostate.
   ...pair('ureter', 'Ureter', [236, 146, 190], [158, 86, 132]),
 
-  // Arteries. Slicer keeps the whole arterial tree in one red, so branches that
-  // touch the aorta are separated by lightness.
+  // Arteries. Slicer keeps the whole tree in one red, so branches touching the
+  // aorta are separated by lightness.
   ['aorta', 'Aorta', [224, 97, 76]], // Slicer aorta
-  // RETUNED, the celiac trunk arises straight off the aorta and must not read
-  // as part of it.
+  // RETUNED, the coeliac trunk arises straight off the aorta.
   ['celiac_trunk', 'Coeliac trunk', [176, 32, 60]],
   ['pulmonary_artery', 'Pulmonary artery', [0, 122, 171]], // SlicerTotalSegmentator
   ['brachiocephalic_trunk', 'Brachiocephalic trunk', [196, 121, 79]], // SlicerTotalSegmentator
   // RETUNED from the generic artery red 216,101,79, which is dE 4 from aorta.
   ...pair('subclavian_artery', 'Subclavian artery', [176, 60, 52]),
   ...pair('common_carotid_artery', 'Common carotid artery', [246, 146, 110]),
-  // RETUNED from the generic artery red, which is dE 4 from the left kidney the
-  // vessels run beside at the L4 level.
+  // RETUNED from the generic artery red, dE 4 from the left kidney these run
+  // beside at L4.
   ...pair('iliac_artery', 'Common iliac artery', [214, 84, 100], [166, 52, 68]),
 
   // Veins.
   ['postcava', 'Inferior vena cava', [0, 151, 206]], // Slicer vein / SlicerTotalSegmentator IVC
   ['superior_vena_cava', 'Superior vena cava', [0, 141, 226]], // SlicerTotalSegmentator
-  // RETUNED, the LUT reuses the IVC blue here and the two meet at the porta
-  // hepatis.
+  // RETUNED, the LUT reuses the IVC blue and the two meet at the porta hepatis.
   ['portal_vein_and_splenic_vein', 'Portal and splenic vein', [76, 118, 190]],
   ['hepatic_vessel', 'Hepatic vessels', [104, 190, 226]], // no LUT entry
   ['pulmonary_vein', 'Pulmonary vein', [195, 45, 25]], // SlicerTotalSegmentator
   ...pair('brachiocephalic_vein', 'Brachiocephalic vein', [64, 176, 220]),
   ...pair('iliac_vena', 'Common iliac vein', [120, 190, 235]),
 
-  // Heart. The whole-organ label keeps Slicer's colour; the chamber labels are a
-  // RETUNED ladder, because Slicer puts the myocardium and all four chambers
-  // inside dE 5 of one another and the chamber task renders them together.
+  // Heart. Whole-organ label keeps Slicer's colour; the chambers are a RETUNED
+  // ladder, since Slicer puts the myocardium and all four inside dE 5 of one
+  // another and the chamber task renders them together.
   ['heart', 'Heart', [206, 110, 84]], // Slicer heart
   ['heart_myocardium', 'Myocardium', [186, 92, 68]],
   ['heart_atrium_left', 'Left atrium', [250, 178, 156]],
@@ -261,10 +211,9 @@ const DEFS: readonly Def[] = [
 
   // Airway and lungs.
   ['trachea', 'Trachea', [182, 228, 255]], // Slicer trachea
-  // RETUNED. Slicer's lung beige sits inside the ivory rib cage that lungs are
-  // always displayed against, so the lung family moves to the pale blue-grey
-  // that aerated lung is conventionally rendered in. Lobe sets lightness, side
-  // sets hue.
+  // RETUNED. Slicer's lung beige sits inside the ivory rib cage lungs are always
+  // displayed against, so the family moves to the pale blue-grey aerated lung is
+  // conventionally drawn in. Lobe sets lightness, side sets hue.
   ['lung_left', 'Lung (left)', [176, 158, 196]],
   ['lung_right', 'Lung (right)', [128, 156, 182]],
   ['lung_upper_lobe_left', 'Upper lobe (left lung)', [146, 130, 168]],
@@ -286,20 +235,18 @@ const DEFS: readonly Def[] = [
   ['costal_cartilages', 'Costal cartilage', [111, 184, 210]], // SlicerTotalSegmentator
   ['skull', 'Skull', [241, 213, 144]], // Slicer skull
   ['face', 'Face', [255, 218, 185]], // SlicerTotalSegmentator head
-  // RETUNED to a cooler bone grey. The girdles overlie the ribs and the spine on
-  // the same slices, and the LUT gives scapula, hip and the lumbar spine one
-  // shared ivory, so the appendicular skeleton is shifted off the axial hue
-  // while staying recognisably osseous. The shoulder needs six separable shades
-  // (three bones, two sides), so those pairs are given explicitly.
+  // RETUNED to a cooler bone grey: the LUT gives scapula, hip and the lumbar
+  // spine one shared ivory, and the girdles overlie ribs and spine on the same
+  // slices. The shoulder needs six separable shades (three bones, two sides),
+  // hence the explicit right-hand colours.
   ...pair('humerus', 'Humerus', [244, 240, 226], [176, 172, 163]),
   ...pair('scapula', 'Scapula', [166, 161, 138], [112, 108, 92]),
   ...pair('clavicula', 'Clavicle', [204, 198, 172], [136, 131, 112]),
   ...pair('femur', 'Femur', [255, 238, 170]), // SlicerTotalSegmentator femur
   ...pair('hip', 'Hip bone', [184, 174, 142]),
 
-  // Muscle. The LUT puts erector spinae, iliopsoas and all three gluteals
-  // within dE 5 of one another; they are spread across the same red-brown
-  // family by lightness so the pelvic overlay stays readable.
+  // Muscle. The LUT puts erector spinae, iliopsoas and all three gluteals within
+  // dE 5 of one another, so these spread across the red-brown family by lightness.
   ...pair('autochthon', 'Erector spinae', [205, 118, 105]),
   ...pair('iliopsoas', 'Iliopsoas', [240, 168, 132]),
   ...pair('gluteus_maximus', 'Gluteus maximus', [150, 74, 60]),
@@ -308,20 +255,17 @@ const DEFS: readonly Def[] = [
 ];
 
 /**
- * Every lookup table below is null-prototyped. The keys come from file names a
- * user dropped on the page, and on a plain object a mask called "constructor"
- * would resolve through Object.prototype and hand back a function where an
- * entry is expected. `normalise` lowercases, so "constructor" is the only
- * inherited member that can survive it, but one is enough to abort a load.
+ * Every lookup table below is null-prototyped. Keys come from file names a user
+ * dropped on the page, and on a plain object a mask called "constructor" would
+ * resolve through Object.prototype and hand back a function, aborting the load.
  */
 function emptyTable<T>(): Record<string, T> {
   return Object.create(null) as Record<string, T>;
 }
 
 /**
- * Alternative spellings seen in the wild, mapped to the canonical key. Keys and
- * values are both in normalised form. Left/right word order is handled
- * separately in `lookupAnatomy` so this table does not need a row per side.
+ * Alternative spellings seen in the wild, keys and values both normalised.
+ * Left/right word order is handled in `lookupAnatomy`, so no row per side.
  */
 const ALIASES: Readonly<Record<string, string>> = Object.assign(emptyTable<string>(), {
   gallbladder: 'gall_bladder',
@@ -353,8 +297,8 @@ const ALIASES: Readonly<Record<string, string>> = Object.assign(emptyTable<strin
   thyroid: 'thyroid_gland',
   costal_cartilage: 'costal_cartilages',
   head: 'face',
-  // Stems of bilateral pairs. `resolveCanonical` reattaches the side, so one
-  // row here covers both "clavicle" and "clavicle_left".
+  // Stems of bilateral pairs. `resolveCanonical` reattaches the side, so one row
+  // covers both "clavicle" and "clavicle_left".
   adrenal: 'adrenal_gland',
   suprarenal_gland: 'adrenal_gland',
   clavicle: 'clavicula',
@@ -391,9 +335,7 @@ const BY_NORMALISED: Readonly<Record<string, string>> = (() => {
 })();
 
 /**
- * Collapse a mask name to a comparison key: lower case, every run of
- * non-alphanumerics becomes one underscore, and any file-extension or
- * segmentation-qualifier tail is dropped. "Kidney Left", "kidney-left" and
+ * Collapse a mask name to a comparison key. "Kidney Left", "kidney-left" and
  * "KIDNEY_LEFT.nii.gz" all land on "kidney_left".
  */
 function normalise(raw: string): string {
@@ -401,10 +343,9 @@ function normalise(raw: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '');
-  // Stripping runs to a fixed point because a real export carries an extension
-  // and a qualifier at once ("liver_mask.nii.gz"), and taking only the outer
-  // one leaves a name no table can match. Each pass shortens `s` by at least
-  // three characters and never empties it, so this terminates.
+  // To a fixed point: a real export carries an extension and a qualifier at once
+  // ("liver_mask.nii.gz"), and stripping only the outer one leaves a name no
+  // table can match. Every pass shortens `s`, so this terminates.
   let stripped = true;
   while (stripped) {
     stripped = false;
@@ -441,9 +382,8 @@ function expandSideAbbreviation(normalised: string): string | null {
 const unknownCache = new Map<string, AnatomyEntry>();
 
 /**
- * Resolve a mask name to its display entry. Never throws: an unrecognised name
- * gets a deterministic palette colour and a title-cased label, so a mask this
- * table has not heard of still renders and still legends correctly.
+ * Never throws. A name this table has not heard of gets a deterministic palette
+ * colour and a title-cased label, so it still renders and still legends.
  */
 export function lookupAnatomy(key: string): AnatomyEntry {
   const normalised = normalise(key);
@@ -504,7 +444,7 @@ function titleCase(normalised: string): string {
   return side ? `${label} (${side})` : label;
 }
 
-/** FNV-1a, 32-bit. Cheap, well spread over short ASCII names, and stable. */
+/** FNV-1a, 32-bit. Cheap and well spread over short ASCII names. */
 function hashKey(key: string): number {
   let h = 0x811c9dc5;
   for (let i = 0; i < key.length; i++) {
@@ -516,19 +456,16 @@ function hashKey(key: string): number {
 
 // --- fallback palette ------------------------------------------------------
 
-/**
- * 1/phi. Stepping the hue by an irrational fraction of the circle keeps
- * consecutive indices about 137.5 degrees apart, so no two neighbours land in
- * the same hue family no matter how many structures are requested.
- */
+// 1/phi. Stepping hue by an irrational fraction of the circle puts consecutive
+// indices about 137.5 degrees apart, so neighbours never share a hue family
+// however many structures turn up.
 const GOLDEN_RATIO_CONJUGATE = 0.618033988749895;
 const PALETTE_SATURATION = 0.62;
 const PALETTE_VALUE = 0.95;
 
 export function paletteColor(n: number): [number, number, number] {
   const index = Number.isFinite(n) ? Math.trunc(n) : 0;
-  // The +1 offset keeps index 0 off pure red, which a reader would take for a
-  // vessel.
+  // The +1 keeps index 0 off pure red, which a reader takes for a vessel.
   const hue = fract((index + 1) * GOLDEN_RATIO_CONJUGATE);
   return hsvToRgb(hue, PALETTE_SATURATION, PALETTE_VALUE);
 }

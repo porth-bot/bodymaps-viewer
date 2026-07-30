@@ -1,14 +1,7 @@
 /**
- * NIfTI-1 and NIfTI-2 reader.
- *
- * Scope note: this reads the *first* 3D volume of a file. dim[4..7] (time,
- * vectors) are parsed into the header but not materialised, because the whole
- * app downstream is built on a single scalar grid (see `Volume` in types.ts).
- *
- * The two header layouts share almost no field offsets, so they are read by
- * separate functions into one intermediate shape and then finished in common
- * code. Offsets below come from nifti1.h / nifti2.h and were cross-checked
- * against files written by nibabel.
+ * NIfTI-1 and NIfTI-2 reader. Only the first 3D volume is read: dim[4..7]
+ * (time, vectors) reach the header but are never materialised. Field offsets
+ * are from nifti1.h / nifti2.h, cross-checked against nibabel output.
  */
 
 import { NiftiDataType } from './types';
@@ -22,11 +15,7 @@ const NIFTI2_HEADER_SIZE = 540;
 const NIFTI1_DEFAULT_DATA_OFFSET = 352;
 const NIFTI2_DEFAULT_DATA_OFFSET = 544;
 
-/**
- * Detected rather than assumed: every consumer platform today is
- * little-endian, but the byte-swap decision below is only correct if this is
- * a fact about the machine instead of a hardcoded guess.
- */
+/** Detected, not assumed: the byte-swap decision below depends on it. */
 const PLATFORM_LITTLE_ENDIAN = new Uint8Array(Uint16Array.of(1).buffer)[0] === 1;
 
 interface DataTypeInfo {
@@ -37,14 +26,11 @@ interface DataTypeInfo {
 }
 
 /**
- * 64-bit integers are widened to float64 because the rest of the app (and
- * WebGL) has no bigint path. Magnitudes above 2^53 lose their low bits; that
- * only occurs in synthetic label data, never in imaging.
+ * Widened to float64 because nothing downstream, WebGL included, takes bigint.
+ * Above 2^53 the low bits go, which only happens in synthetic label data.
  *
- * The loop is spelled out instead of `Float64Array.from(view, Number)` because
- * that form goes through the generic iterate-and-convert path and allocates a
- * second heap bigint per element: about 8x slower, or a full second of stalled
- * worker on a 12.4M voxel volume.
+ * Not `Float64Array.from(view, Number)`: that allocates a heap bigint per
+ * element, 8x slower, a full second of stalled worker on 12.4M voxels.
  */
 function widenBigInts(source: BigInt64Array | BigUint64Array): Float64Array {
   const out = new Float64Array(source.length);
@@ -136,7 +122,7 @@ class FieldReader {
     return out;
   }
 
-  /** NUL-terminated ASCII, padded with junk in some writers past the NUL. */
+  /** NUL-terminated ASCII. Some writers leave junk past the NUL. */
   ascii(offset: number, maxLength: number): string {
     const limit = Math.min(offset + maxLength, this.bytes.length);
     let end = offset;
@@ -222,10 +208,7 @@ function affineFromSrow(srow: number[]): Mat4 {
   return m;
 }
 
-/**
- * nifti1.h "method 2": rebuild the rotation from the unit quaternion whose
- * real part was dropped on write, then scale its columns by the voxel sizes.
- */
+/** nifti1.h "method 2". The quaternion's real part is not stored, so it has to be recovered. */
 function affineFromQuaternion(
   quatern: [number, number, number],
   qoffset: [number, number, number],
@@ -235,9 +218,8 @@ function affineFromQuaternion(
   let a: number;
   const norm = b * b + c * c + d * d;
   if (1 - norm < 1e-7) {
-    // Storage rounding can push the sum just past 1, which would make `a`
-    // imaginary. The spec's remedy is a 180 degree rotation about the
-    // renormalised (b,c,d) axis.
+    // Rounding can push the sum past 1, which would make `a` imaginary. The
+    // spec's remedy is 180 degrees about the renormalised (b,c,d) axis.
     const scale = 1 / Math.sqrt(norm);
     b *= scale;
     c *= scale;
@@ -253,8 +235,8 @@ function affineFromQuaternion(
     2 * (b * d - a * c), 2 * (c * d + a * b), a * a + d * d - b * b - c * c,
   ];
 
-  // pixdim[0] carries the handedness flag, not a size. Only -1 means anything
-  // and only to the third column; writers that leave it 0 mean 1.
+  // pixdim[0] is the handedness flag, not a size. Only -1 means anything, and
+  // only to the third column. Writers that leave it 0 mean 1.
   const qfac = pixdim[0] < 0 ? -1 : 1;
   const scale = [pixdim[1], pixdim[2], pixdim[3] * qfac];
 
@@ -270,8 +252,8 @@ function affineFromQuaternion(
 function affineFromPixdim(pixdim: number[]): Mat4 {
   const m = new Float64Array(16);
   for (let i = 0; i < 3; i++) {
-    // A zero or garbage pixdim would make the affine singular and every
-    // world-to-voxel inverse downstream throw, so fall back to unit spacing.
+    // A zero or garbage pixdim makes the affine singular, and every
+    // world-to-voxel inverse downstream then throws.
     const step = pixdim[i + 1];
     m[i * 4 + i] = Number.isFinite(step) && step !== 0 ? step : 1;
   }
@@ -279,34 +261,21 @@ function affineFromPixdim(pixdim: number[]): Mat4 {
   return m;
 }
 
-/**
- * Relative floor on the affine's conditioning, see `isUsableAffine`. Well below
- * anything a real scan produces (columns near orthogonal give ~1) and well
- * above the ~2e-7 a genuinely rank-deficient matrix reaches once its entries
- * have been rounded to the float32 that NIfTI-1 stores srow_* in.
- */
+/** Conditioning floor for `isUsableAffine`. Real scans give ~1; a rank-deficient
+ *  matrix reaches ~2e-7 once rounded to the float32 srow_* is stored in. */
 const MIN_RELATIVE_DETERMINANT = 1e-6;
 
 /**
- * Whether an affine is safe to hand downstream.
+ * Two malformed headers turn up in the wild: sform_code set with srow_* left
+ * empty, and a sane rotation block with a NaN or Infinity origin. Both have to
+ * be caught so the qform can take over. A NaN translation slips past the pivot
+ * check in `mat4Invert` and reaches the renderer as a black screen.
  *
- * Two malformed-header shapes occur in the wild. Some converters set
- * sform_code without filling in srow_*, leaving a degenerate matrix; others
- * write a partially initialised header whose rotation block is fine but whose
- * origin comes out NaN or Infinity. Both have to be caught so the qform can
- * take over, because neither is stopped further downstream: a NaN translation
- * defeats the pivot check in `mat4Invert` and reaches the renderer as world
- * coordinates that are silently NaN, i.e. a black screen with no diagnostic.
- *
- * Conditioning is measured as the determinant relative to the product of the
- * column norms rather than against an absolute floor. A raw determinant scales
- * as the cube of the voxel size, so a fixed threshold would reject a perfectly
- * conditioned fine-voxel grid, and it would make the verdict depend on
- * xyzt_units, which is only applied after this runs.
+ * Determinant relative to the column norms, not an absolute floor: a raw one
+ * scales as the cube of the voxel size and would depend on xyzt_units.
  */
 function isUsableAffine(m: Mat4): boolean {
-  // Row 3 is synthesised, never read from the file, so only the 12 meaningful
-  // entries (rotation/scale plus the origin column) are worth checking.
+  // Row 3 is synthesised, never read from the file.
   for (let i = 0; i < 12; i++) {
     if (!Number.isFinite(m[i])) return false;
   }
@@ -353,8 +322,8 @@ export function parseNiftiHeader(buffer: ArrayBuffer): NiftiHeader {
     );
   }
 
-  // Spec: slope 0 disables scaling. Unset fields are also commonly written as
-  // NaN (nibabel does this), which would otherwise poison every voxel.
+  // Spec: slope 0 disables scaling. nibabel writes unset fields as NaN, which
+  // would otherwise poison every voxel.
   let sclSlope = raw.sclSlope;
   let sclInter = raw.sclInter;
   if (!Number.isFinite(sclSlope) || sclSlope === 0) {
@@ -379,9 +348,8 @@ export function parseNiftiHeader(buffer: ArrayBuffer): NiftiHeader {
     affineSource = 'pixdim';
   }
 
-  // Convert the world frame to millimetres. Scaling whole rows covers both the
-  // direction/spacing block (which sform carries in file units) and the
-  // origin (which qform carries separately), so the affine stays consistent.
+  // Whole rows, so both the direction/spacing block (file units, in sform) and
+  // the origin (carried separately by qform) reach millimetres together.
   const spatialUnits = raw.xyztUnits & 0x07;
   const scale = spatialScale(spatialUnits);
   const pixdim = raw.pixdim.slice();
@@ -396,8 +364,7 @@ export function parseNiftiHeader(buffer: ArrayBuffer): NiftiHeader {
   return {
     version,
     littleEndian,
-    // Filled in by parseNifti once the rank has been validated; a bare header
-    // read has no reason to care how many frames follow it.
+    // Filled in by parseNifti once the rank has been validated.
     volumeCount: 1,
     dim: raw.dim,
     datatype: raw.datatype as NiftiDataType,
@@ -435,18 +402,13 @@ function swapBytesInPlace(bytes: Uint8Array, width: number): void {
 const AXIS_NAMES = ['i', 'j', 'k'] as const;
 
 /**
- * The three spatial sizes, validated.
- *
- * dim[0] is the dimensionality, and a 2D image leaves dim[3] unused: writers
- * spell "unused" as 0 about as often as 1, so an axis past dim[0] may default.
- * Within dim[0] a size of 0 is a corrupt header and has to be reported.
- * Defaulting it to 1 (which is what a bare `dim[n] || 1` does) turns the file
- * into a plausible one-voxel-thick volume that renders without complaint.
+ * Writers spell "unused" as 0 about as often as 1, so an axis past dim[0] may
+ * default. Within dim[0] a 0 is corrupt and has to be reported: `dim[n] || 1`
+ * turns the file into a plausible one-voxel-thick volume that renders fine.
  */
 function spatialDims(header: NiftiHeader): [number, number, number] {
   const declaredRank = header.dim[0];
-  // A rank outside the spec's 1..7 is itself corrupt; treating it as 3 means
-  // all three sizes are then required rather than quietly defaulted.
+  // A rank outside 1..7 is corrupt too, and calling it 3 requires all three.
   const rankIsSane = Number.isInteger(declaredRank) && declaredRank >= 1 && declaredRank <= 7;
   const rank = rankIsSane ? declaredRank : 3;
 
@@ -462,13 +424,8 @@ function spatialDims(header: NiftiHeader): [number, number, number] {
   return sizes;
 }
 
-/**
- * How many 3D volumes the file stores, from the non-spatial dimensions.
- *
- * A 4D file is a time course or a diffusion series. Only the first volume is
- * read, which is the right default for a viewer, but the count is reported so
- * the UI can say so instead of silently dropping the rest.
- */
+/** Only the first volume is read, but 4D files (time course, diffusion series)
+ *  report the count so the UI can say the rest were dropped. */
 function storedVolumeCount(header: NiftiHeader): number {
   const rank = header.dim[0];
   if (!Number.isInteger(rank) || rank < 4 || rank > 7) return 1;
@@ -492,15 +449,13 @@ export function parseNifti(buffer: ArrayBuffer): NiftiImage {
   const defaultOffset = header.version === 1 ? NIFTI1_DEFAULT_DATA_OFFSET : NIFTI2_DEFAULT_DATA_OFFSET;
   const dataOffset = header.voxOffset > 0 ? header.voxOffset : defaultOffset;
   if (!Number.isInteger(dataOffset)) {
-    // vox_offset is a float32 in NIfTI-1, so a corrupt file can name a
-    // fractional start. Slicing there would silently truncate.
+    // vox_offset is a float32 in NIfTI-1, so a corrupt file can name a fractional start.
     throw new Error(`Invalid NIfTI vox_offset ${header.voxOffset}: must be a whole byte count`);
   }
   if (dataOffset < defaultOffset) {
-    // Writers that confuse sizeof_hdr (348) with the first data byte (352) are
-    // common enough to name. The past-the-end check below cannot catch this:
-    // starting early always leaves more than enough bytes, so the volume just
-    // comes out shifted by a couple of samples and still renders.
+    // Confusing sizeof_hdr (348) with the first data byte (352) is a common
+    // writer bug, and the past-the-end check below cannot catch it: starting
+    // early leaves plenty of bytes, so the volume just renders a few samples off.
     throw new Error(
       `Invalid NIfTI vox_offset ${header.voxOffset}: voxels cannot start before byte ` +
         `${defaultOffset} in a single-file NIfTI-${header.version}, which is where the header ` +
@@ -519,9 +474,8 @@ export function parseNifti(buffer: ArrayBuffer): NiftiImage {
   const needsSwap = header.littleEndian !== PLATFORM_LITTLE_ENDIAN;
   const aligned = dataOffset % info.bytes === 0;
   if (!needsSwap && aligned) {
-    // Zero-copy: a 25 MB CT does not need a second 25 MB just to be read. The
-    // returned array aliases `buffer`, which is safe because every caller
-    // hands us a buffer freshly produced by fetch or gunzip.
+    // Zero-copy: a 25 MB CT does not need a second 25 MB to be read. The result
+    // aliases `buffer`, safe because callers always pass a fresh fetch or gunzip.
     return { header, data: info.view(buffer, dataOffset, count) };
   }
   const copy = buffer.slice(dataOffset, dataOffset + byteLength);
@@ -535,20 +489,14 @@ async function gunzipNative(buffer: ArrayBuffer): Promise<ArrayBuffer> {
 }
 
 /**
- * Decompress with fflate, for browsers without DecompressionStream (Safari
- * before 16.4, Firefox before 113) and for the streams the native decoder
- * rejects.
- *
- * fflate's one-shot `gunzipSync` is not usable here: it sizes its output from
- * the last four bytes of the whole buffer, so a member padded with NULs comes
- * back as zero bytes and a concatenated stream comes back as its first member
- * only, both without an error. The streaming decoder walks member by member
- * instead, and stopping at InvalidHeader keeps every complete member that
- * preceded the trailing bytes.
+ * Fallback for browsers without DecompressionStream (Safari before 16.4,
+ * Firefox before 113) and for streams the native decoder rejects. Not fflate's
+ * one-shot `gunzipSync`: it sizes output from the last four bytes of the whole
+ * buffer, so a NUL-padded member decodes to zero bytes and a concatenated
+ * stream to its first member only, neither with an error.
  */
 async function gunzipFflate(buf: ArrayBuffer): Promise<ArrayBuffer> {
-  // Imported lazily so browsers with a native gzip decoder never pay for the
-  // fallback in the initial bundle.
+  // Lazy, so browsers with a native decoder never pay for this in the bundle.
   const { FlateErrorCode, Gunzip } = await import('fflate');
 
   const chunks: Uint8Array[] = [];
@@ -562,10 +510,9 @@ async function gunzipFflate(buf: ArrayBuffer): Promise<ArrayBuffer> {
   try {
     stream.push(new Uint8Array(buf), true);
   } catch (error) {
-    // InvalidHeader once at least one whole member has been inflated means the
-    // bytes after it are padding rather than another member. Every other
-    // failure (above all UnexpectedEOF) means what we have is incomplete, and
-    // returning a clean prefix would be reported downstream as a missing .img.
+    // InvalidHeader after at least one whole member means trailing padding, not
+    // another member. Anything else, UnexpectedEOF above all, means what we have
+    // is incomplete, and a clean prefix surfaces downstream as a missing .img.
     if (total === 0 || (error as FlateError).code !== FlateErrorCode.InvalidHeader) throw error;
   }
   if (total === 0) {
@@ -581,10 +528,7 @@ async function gunzipFflate(buf: ArrayBuffer): Promise<ArrayBuffer> {
   return out.buffer as ArrayBuffer;
 }
 
-/**
- * Transparently decompress a .nii.gz. Returns `buf` untouched when it is not
- * gzipped, so callers can stay ignorant of which form they fetched.
- */
+/** Decompresses a .nii.gz, or returns `buf` untouched when it is not gzipped. */
 export async function gunzipIfNeeded(buf: ArrayBuffer): Promise<ArrayBuffer> {
   if (buf.byteLength < 2) return buf;
   const magic = new Uint8Array(buf, 0, 2);
@@ -594,8 +538,8 @@ export async function gunzipIfNeeded(buf: ArrayBuffer): Promise<ArrayBuffer> {
     try {
       return await gunzipNative(buf);
     } catch {
-      // Fall through: DecompressionStream refuses a stream with anything after
-      // the last member, which some writers pad with NULs to a block boundary.
+      // DecompressionStream refuses anything after the last member, which some
+      // writers pad with NULs to a block boundary.
     }
   }
   return await gunzipFflate(buf);

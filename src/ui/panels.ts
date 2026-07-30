@@ -1,10 +1,4 @@
-/**
- * The sidebar. Builds the DOM once, then reconciles it from state.
- *
- * The structure list is the only part that rebuilds its children, and only
- * when the structure set itself changes. Everything else updates in place, so
- * dragging a slider never touches layout.
- */
+/** The sidebar. Builds the DOM once, then reconciles it from state. */
 
 import type { OrbitCamera } from '../camera/orbit';
 import { WINDOW_PRESETS } from '../core/presets';
@@ -91,8 +85,6 @@ function buildCasePanel(deps: PanelDeps, updaters: Array<(s: AppState) => void>)
       ['Voxels', formatCount(v.dims[0] * v.dims[1] * v.dims[2])],
     ];
     if (v.volumeCount > 1) {
-      // A 4D series loads its first frame. Saying so beats letting a reader
-      // wonder where the other frames went.
       rows.push(['4D series', `frame 1 of ${v.volumeCount}`]);
     }
     if (s.labels) {
@@ -203,13 +195,6 @@ function buildDisplayPanel(deps: PanelDeps, updaters: Array<(s: AppState) => voi
   return root;
 }
 
-/**
- * Voxel histogram behind the window controls.
- *
- * Plotted on a log scale because air occupies more than half of any abdominal
- * CT: on a linear scale the entire soft-tissue range, which is the part anyone
- * is windowing on, would be an invisible line along the axis.
- */
 let histogramCache: { counts: Uint32Array; min: number; max: number } | null = null;
 
 function drawHistogram(canvas: HTMLCanvasElement, state: AppState): void {
@@ -242,6 +227,9 @@ function drawWindowOverlay(canvas: HTMLCanvasElement, state: AppState): void {
   let peak = 0;
   for (const c of counts) peak = Math.max(peak, c);
   if (peak === 0) return;
+  // Log scale: air is more than half of any abdominal CT, so on a linear scale
+  // the soft-tissue range anyone is windowing on is an invisible line along
+  // the axis.
   const logPeak = Math.log1p(peak);
 
   ctx.fillStyle = 'rgba(120, 170, 230, 0.35)';
@@ -251,7 +239,7 @@ function drawWindowOverlay(canvas: HTMLCanvasElement, state: AppState): void {
     ctx.fillRect(i * bw, H - h, Math.ceil(bw), h);
   }
 
-  // Shade the region the current window actually maps to visible grey.
+  // Shade the range the window maps to visible grey.
   const lo = state.windowLevel.level - state.windowLevel.window / 2;
   const hi = state.windowLevel.level + state.windowLevel.window / 2;
   const toX = (hu: number) => ((hu - min) / (max - min)) * W;
@@ -309,6 +297,9 @@ function buildStructuresPanel(deps: PanelDeps, updaters: Array<(s: AppState) => 
   const empty = el('p', 'hint', 'No structures loaded.');
   body.append(empty);
 
+  // The only list that rebuilds its children, and only when the structure set
+  // itself changes. Everything else in the sidebar updates in place, so
+  // dragging a slider never touches layout.
   let signature = '';
   const rows = new Map<number, { li: HTMLElement; eye: HTMLElement; status: HTMLElement }>();
 

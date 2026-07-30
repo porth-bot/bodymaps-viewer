@@ -1,66 +1,41 @@
 /**
- * Radiological window/level presets and the conversions around them.
+ * CT window/level presets, and the conversions around them.
  *
- * A CT window is a linear ramp: everything at or below `level - window/2`
- * renders black, everything at or above `level + window/2` renders white.
- * Clinicians quote windows as "WW/WL" (width then centre), both in Hounsfield
- * units, so the numbers below are the ones a radiologist would read off a
- * console rather than anything rescaled for the renderer.
- *
- * Values are the widely taught defaults from Radiopaedia's CT windowing
- * reference (https://radiopaedia.org/articles/windowing-ct), cross-checked
- * against LITFL's abdominal CT window series
- * (https://litfl.com/abdominal-ct-windows-advanced/) and Radiology Cafe's CT
- * overview (https://www.radiologycafe.com/radiology-basics/imaging-modalities/ct-overview/).
- * 3D Slicer ships slightly narrower defaults in
- * Modules/Loadable/Volumes/Resources/VolumeDisplayPresets.json (CT-Abdomen
- * 350/40, CT-Bone 1000/400, CT-Lung 1400/-500, CT-Brain 100/50); where the two
- * disagree we follow the clinical convention and note Slicer's value inline,
- * because the viewer is read by people who learned the Radiopaedia numbers.
- *
- * Exact preset numbers vary by a few tens of HU between institutions. These are
- * the mid-range consensus values, not a claim that any single site uses them.
- *
- * A note on this dataset specifically: BDMAP_00000338 stores CT as int16 with
- * scl_slope = 2000/65535 and scl_inter = 1000/65535, so the entire int16 range
- * maps onto exactly [-1000, +1000] HU. The bone preset reaches +1300 HU and the
- * lung preset reaches -1350 HU, both past the ends of the stored range, so both
- * clip flat at the extremes on this volume. That is a property of how the data
- * was quantised on write, not a defect in the windowing code. Volumes stored at
- * full HU depth use the same presets and show the extra contrast.
+ * Presets are quoted the way a radiologist reads them off a console, "WW/WL",
+ * width then centre, both in Hounsfield units. They follow Radiopaedia's CT
+ * windowing reference (https://radiopaedia.org/articles/windowing-ct); where
+ * 3D Slicer's VolumeDisplayPresets.json disagrees, its value is noted inline.
+ * Institutions differ by a few tens of HU either way.
  */
 
 import type { Preset, WindowLevel } from './types';
 
-/**
- * Smallest window we will ever hand back. A zero-width window makes the display
- * transfer function divide by zero, so degenerate ranges collapse to this
- * instead, which renders the constant volume as flat mid-grey.
- */
+// Zero width divides by zero in the display transfer function.
 const MIN_WINDOW = 1e-6;
 
 /** Window used when the caller passes a range we cannot interpret at all. */
 const FALLBACK_WINDOW = 2000;
 
+// BDMAP_00000338 stores CT as int16 with scl_slope = 2000/65535 and scl_inter =
+// 1000/65535, so the whole int16 range maps onto exactly [-1000, +1000] HU. Bone
+// reaches +1300 and lung -1350, so both clip flat on this volume. That is the
+// quantisation on write, not the windowing.
 export const WINDOW_PRESETS: Preset[] = [
-  // Ordered so the digits a user reaches for first are the ones an abdominal
-  // CT reader actually cycles through.
+  // Digit order follows what an abdominal reader actually cycles through.
+  // Slicer: 350/40.
   { id: 'soft-tissue', name: 'Soft tissue / abdomen', level: 50, window: 400, hotkey: '1' },
   { id: 'liver', name: 'Liver', level: 30, window: 150, hotkey: '2' },
   { id: 'mediastinum', name: 'Mediastinum', level: 50, window: 350, hotkey: '3' },
-  // Radiopaedia lists 600/200 for vascular and cardiac work. Narrower CTA
-  // windows exist for calcified plaque, but 600/200 is the general default.
+  // Narrower CTA windows exist for calcified plaque; 600/200 is the general one.
   { id: 'angio', name: 'CT angiography', level: 200, window: 600, hotkey: '4' },
-  // Slicer uses 1400/-500 for the same job.
+  // Slicer: 1400/-500.
   { id: 'lung', name: 'Lung', level: -600, window: 1500, hotkey: '5' },
-  // Slicer uses 1000/400; 1800 is the value taught for reading cortical detail.
+  // Slicer: 1000/400. 1800 is what gets taught for cortical detail.
   { id: 'bone', name: 'Bone', level: 400, window: 1800, hotkey: '6' },
+  // Slicer: 100/50.
   { id: 'brain', name: 'Brain', level: 40, window: 80, hotkey: '7' },
-  // Radiopaedia gives subdural as a range (W 130-300, L 50-100); 200/75 is the
-  // midpoint and the value most departments preset.
+  // Radiopaedia gives a range here (W 130-300, L 50-100); this is the midpoint.
   { id: 'subdural', name: 'Subdural', level: 75, window: 200, hotkey: '8' },
-  // Spans exactly the [-1000, +1000] HU this dataset can represent, so it is
-  // the "show me everything that is there" escape hatch.
   { id: 'full-range', name: 'Full range', level: 0, window: 2000, hotkey: '9' },
 ];
 
@@ -71,10 +46,8 @@ export function windowToRange(wl: WindowLevel): [number, number] {
 }
 
 /**
- * Inverse of `windowToRange`. Accepts the bounds in either order so a
- * drag-to-window interaction can pass raw start/end values, and always returns
- * a finite level and a positive finite width, because everything downstream
- * divides by that width.
+ * Bounds may arrive in either order, so a drag-to-window can pass raw
+ * start/end. Width comes back positive and finite: downstream divides by it.
  */
 export function rangeToWindow(lo: number, hi: number): WindowLevel {
   if (!Number.isFinite(lo) || !Number.isFinite(hi)) {
@@ -82,29 +55,24 @@ export function rangeToWindow(lo: number, hi: number): WindowLevel {
   }
   const low = Math.min(lo, hi);
   const high = Math.max(lo, hi);
-  // Each bound is halved before summing: `low + high` overflows to Infinity for
-  // finite endpoints near the float64 limit, and halving afterwards would keep
-  // it there. Both forms are exact in binary floating point everywhere else.
+  // Halve each bound before summing: `low + high` overflows to Infinity for
+  // finite endpoints near the float64 limit, and halving afterwards keeps it
+  // there. Both forms are exact in binary floating point everywhere else.
   const level = low / 2 + high / 2;
   const width = high - low;
   // The subtraction can overflow where the sum does not, and Math.max would
-  // then propagate the resulting NaN straight past the MIN_WINDOW floor. There
-  // is no honest window for a range that wide, so it takes the same answer as
-  // an uninterpretable one.
+  // carry the NaN straight past the MIN_WINDOW floor.
   if (!Number.isFinite(width)) return { level, window: FALLBACK_WINDOW };
   return { level, window: Math.max(width, MIN_WINDOW) };
 }
 
 /**
- * A usable default window for a volume that no clinical preset fits, such as
- * MR, PET or an unlabelled float volume.
- *
- * `percentileLow` and `percentileHigh` are fractions of the `min`..`max` span,
- * not true histogram percentiles: this function deliberately takes only the two
- * extrema so it can run before any histogram exists. Trimming 2% off each end
- * keeps a single hot voxel or a metal artefact from flattening the whole image.
- * A caller that has already built a histogram should skip this and pass its own
- * percentile values straight to `rangeToWindow`.
+ * Default window for a volume no clinical preset fits: MR, PET, an unlabelled
+ * float volume. `percentileLow`/`percentileHigh` are fractions of the
+ * `min`..`max` span, NOT true histogram percentiles, since this only gets the
+ * two extrema and has to run before any histogram exists. Trimming 2% off each
+ * end stops one hot voxel or a metal artefact flattening the image. Callers
+ * holding a histogram should pass real percentiles to `rangeToWindow` instead.
  */
 export function autoWindow(
   min: number,
@@ -120,10 +88,9 @@ export function autoWindow(
   const high = Math.max(min, max);
   const span = high - low;
   if (span <= 0) return { level: low, window: MIN_WINDOW };
-  // A pair of finite extrema can still span more than float64 can subtract, and
-  // the trim below would then put both bounds at Infinity. There is nothing to
-  // trim off a range that wide, so it goes through untrimmed and rangeToWindow
-  // decides what a window over it means.
+  // Two finite extrema can still span more than float64 can subtract, and the
+  // trim below would put both bounds at Infinity. Nothing to trim off a range
+  // that wide anyway.
   if (!Number.isFinite(span)) return rangeToWindow(low, high);
 
   let fracLow = clamp01(percentileLow, 0);
@@ -132,15 +99,13 @@ export function autoWindow(
 
   const lo = low + span * fracLow;
   const hi = low + span * fracHigh;
-  // Both fractions equal (or so close that the span collapses) would give a
-  // zero-width window, which shows a hard black/white split instead of an
-  // image, so fall back to the untrimmed range.
+  // Equal fractions, or close enough that the span collapses, give a zero-width
+  // window: a hard black/white split rather than an image.
   if (hi - lo < span * 1e-3) return rangeToWindow(low, high);
   return rangeToWindow(lo, hi);
 }
 
-/** `fallback` is used for NaN/Infinity so one bad argument cannot silently
- * collapse the window to a sliver at one end of the range. */
+/** NaN/Infinity takes `fallback`, rather than collapsing the window to a sliver. */
 function clamp01(v: number, fallback: number): number {
   if (!Number.isFinite(v)) return fallback;
   return v < 0 ? 0 : v > 1 ? 1 : v;

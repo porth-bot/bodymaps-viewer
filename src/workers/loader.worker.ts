@@ -1,12 +1,8 @@
 /// <reference lib="webworker" />
 /**
  * Loads a case off the network or off disk: download, gunzip, parse, reorient,
- * pack labels.
- *
- * All of it happens here rather than on the main thread because gunzipping a
- * 16 MB scan and walking 12 million voxels nine times would freeze the UI for
- * several seconds, and the whole point of the viewer is that it stays
- * responsive while a case loads.
+ * pack labels. Off the main thread because gunzipping a 16 MB scan and walking
+ * 12 million voxels nine times freezes the UI for seconds.
  */
 
 import { gunzipIfNeeded, parseNifti } from '../core/nifti';
@@ -58,11 +54,9 @@ async function loadVolume(src: LoadSource): Promise<Volume> {
 }
 
 /**
- * Name the file in the error.
- *
- * Parser and gunzip failures say what went wrong but not what it went wrong
- * on, so a case with a dozen structures reported "unexpected EOF" with no way
- * to tell which file to look at.
+ * Name the file in the error. Parser and gunzip failures say what went wrong
+ * but not where, so a case with a dozen structures reported "unexpected EOF"
+ * with no way to tell which file to look at.
  */
 function blame(key: string, err: unknown): Error {
   const message = err instanceof Error ? err.message : String(err);
@@ -89,18 +83,16 @@ ctx.onmessage = async (event: MessageEvent<LoadRequest>) => {
 
     post({ type: 'progress', token, stage: 'Uploading scan', fraction: 0.35 });
 
-    // The scan goes out before any mask is touched so the user sees anatomy
-    // within a second instead of waiting on the whole case. `normalized` is
-    // transferred; `values` is cloned because the mask statistics below still
-    // need it here.
+    // The scan goes out before any mask is touched, so anatomy is on screen in
+    // about a second instead of after the whole case. `normalized` is
+    // transferred; `values` is cloned, the mask statistics below still need it.
     post({ type: 'volume', token, volume, normalized, ms: volumeMs }, [normalized.buffer]);
 
     if (req.masks.length === 0) return;
 
     const tMasks = performance.now();
-    // Fetch concurrently, parse serially. The files are small and the network
-    // is the bottleneck, but parsing two 12 million voxel masks at once just
-    // doubles peak memory for no gain.
+    // Fetch concurrently, parse serially: the network is the bottleneck, and
+    // parsing two 12 million voxel masks at once only doubles peak memory.
     const buffers = await Promise.all(
       req.masks.map(async (m, i) => {
         const buf = await readSource(m);
@@ -126,10 +118,9 @@ ctx.onmessage = async (event: MessageEvent<LoadRequest>) => {
       try {
         const plain = await gunzipIfNeeded(buf);
         const image = parseNifti(plain);
-        // One file can describe one structure or many. TotalSegmentator's
-        // default output is a single combined map holding values 1..N, and
-        // AbdomenAtlas ships both layouts, so which one this is has to be
-        // decided from the data rather than from the filename.
+        // One file can hold one structure or many: TotalSegmentator's default
+        // output is a combined map of values 1..N, and AbdomenAtlas ships both
+        // layouts, so it has to be decided from the data, not the filename.
         masks.push(...expandMaskFile(key, reorientLike(image, volume), undefined));
       } catch (err) {
         throw blame(key, err);

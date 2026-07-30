@@ -1,15 +1,11 @@
 /**
  * GLSL ES 3.00 shader sources.
  *
- * Every pass works in "volume local millimetres": the origin sits at the
- * corner of voxel (0,0,0) and the volume box spans [0, dims*spacing]. Texture
- * coordinates are therefore just position/extent, and voxel (i,j,k)'s centre
- * lands on ((i,j,k)+0.5)/dims exactly where GL puts its texel centres.
- *
- * Working in local mm rather than patient world coordinates keeps every value
- * near the origin. The sample case has a world origin at -417 mm, and pushing
- * ray positions that far out costs mantissa bits that show up as stippling on
- * the raycast.
+ * Every pass works in volume local millimetres: origin at the corner of voxel
+ * (0,0,0), box spanning [0, dims*spacing], so a texture coordinate is just
+ * position/extent. Patient world coordinates would work too, but the sample
+ * case has its origin at -417 mm and ray positions that far out lose enough
+ * mantissa to stipple the raycast.
  */
 
 const HEADER = `#version 300 es
@@ -21,11 +17,8 @@ precision highp sampler2D;
 `;
 
 /**
- * Shared sampling helpers.
- *
- * `u_huMin`/`u_huRange` undo the [0,1] normalisation applied when the volume
- * was uploaded, so window/level is always applied in true Hounsfield units and
- * the numbers on screen mean what a radiologist expects them to mean.
+ * Shared sampling helpers. u_huMin/u_huRange undo the [0,1] normalisation the
+ * upload applied, so window/level always happens in real Hounsfield units.
  */
 const COMMON = `
 uniform sampler3D u_volume;
@@ -50,15 +43,10 @@ float windowed(float hu) {
   return clamp((hu - lo) / max(u_window, 1e-6), 0.0, 1.0);
 }
 
-/**
- * Like windowed(), but with the bottom of the ramp pinned to the data floor.
- *
- * Only for deciding what to keep, never for what to display. A lung window
- * runs from -1350 HU, which is below anything a CT records, so air at -1000 HU
- * scores 0.23 on the display ramp rather than 0. Any "is this air" test
- * against the raw window therefore stops recognising air the moment the user
- * picks a wide window, and the slice planes in 3D turn back into opaque cards.
- */
+// For deciding what to keep, never for what to display. A lung window starts at
+// -1350 HU, below anything a CT records, so air scores 0.23 on the display ramp
+// instead of 0 and every "is this air" test quietly stops working. Pinning the
+// bottom to the data floor fixes that.
 float opacityRamp(float hu) {
   float lo = max(u_level - 0.5 * u_window, u_huMin);
   float hi = max(u_level + 0.5 * u_window, lo + 1e-6);
@@ -69,9 +57,8 @@ uint labelAt(vec3 uvw) {
   return texture(u_label, uvw).r;
 }
 
-// rgb is the structure colour, a is visibility * per-structure opacity. Both
-// come from the 256x1 LUT so toggling a structure never touches the 12 MB
-// label volume.
+// rgb is the structure colour, a is visibility times opacity. Both live in a
+// 256x1 LUT, so toggling a structure rewrites 1 KB and never the label volume.
 vec4 lutLookup(uint label) {
   return texelFetch(u_lut, ivec2(int(label), 0), 0);
 }
@@ -82,11 +69,9 @@ vec4 lutLookup(uint label) {
 // ---------------------------------------------------------------------------
 
 /**
- * The plane is described by an origin and two edge vectors in texture space,
- * which keeps this shader identical for axial, coronal and sagittal (and would
- * extend to oblique planes without a change). The CPU picks the vectors so
- * that screen right and screen up already carry the correct radiological
- * convention.
+ * One origin plus two edge vectors in texture space, so axial, coronal and
+ * sagittal share this shader and an oblique plane would need no change. The CPU
+ * bakes the radiological convention into the vectors.
  */
 export const SLICE_VERT = `${HEADER}
 layout(location = 0) in vec2 a_uv;
@@ -117,9 +102,8 @@ uniform vec3 u_texU;
 uniform vec3 u_texV;
 
 void main() {
-  // Defensive edge guard. The quad is generated to cover exactly [0,1] in
-  // texture space, so this only ever fires on float error at the border; the
-  // epsilon stops that from drawing a one-pixel black frame around the slice.
+  // The quad covers exactly [0,1], so this only fires on float error at the
+  // border. Without the epsilon that error draws a black frame around the slice.
   const float EPS = 1e-4;
   if (any(lessThan(v_uvw, vec3(-EPS))) || any(greaterThan(v_uvw, vec3(1.0 + EPS)))) {
     fragColor = vec4(0.0, 0.0, 0.0, 1.0);
@@ -194,14 +178,9 @@ void main() {
   float g = windowed(hu);
   uint lbl = labelAt(v_uvw);
 
-  // Drop air. A slice plane in 3D is mostly empty space around the patient,
-  // and drawing that as an opaque black rectangle hides everything behind it
-  // and buries the anatomy in three big cards. Discarding air leaves the body
-  // cross-section floating in place, which is what makes the plane readable
-  // against the volume.
-  //
-  // Tested against the clamped ramp, not the display ramp, so the test still
-  // means "this is air" under a lung or full-range window.
+  // Drop air, or the three planes read as opaque black cards hiding everything
+  // behind them. Tested against the clamped ramp so it still means "air" under
+  // a lung window.
   if (opacityRamp(hu) < u_airCutoff && lbl == 0u) discard;
 
   vec3 rgb = vec3(g);
@@ -236,12 +215,10 @@ void main() {
 `;
 
 /**
- * Two-sided Blinn-Phong with a rim term.
- *
- * Two-sided matters because clipping a slice plane through an organ exposes
- * the inside of the surface, and a one-sided model renders that black. The rim
- * term is what separates organs of similar colour when they overlap on screen,
- * which is the single biggest readability win on a crowded abdominal scene.
+ * Two-sided Blinn-Phong with a rim term. Two-sided because a slice plane
+ * cutting an organ exposes the inside of the surface, which a one-sided model
+ * renders black. The rim is what keeps two similar-coloured organs apart when
+ * they overlap.
  */
 export const MESH_FRAG = `${HEADER}
 in vec3 v_worldPos;
@@ -257,8 +234,7 @@ void main() {
   vec3 V = normalize(u_cameraPos - v_worldPos);
   if (dot(N, V) < 0.0) N = -N;
 
-  // Headlight plus a cool fill from below, which reads as depth without
-  // needing a real light rig.
+  // Headlight plus a cool fill from below. Reads as depth, no light rig needed.
   vec3 L1 = V;
   vec3 L2 = normalize(vec3(-0.4, -0.7, 0.3));
 
@@ -273,8 +249,7 @@ void main() {
            + vec3(spec)
            + u_color * rim * 0.45;
 
-  // Fresnel-ish alpha: grazing angles get more opaque, so a translucent organ
-  // still shows a clear silhouette instead of dissolving at its edges.
+  // Fresnel-ish alpha, so a translucent organ keeps a readable silhouette.
   float alpha = clamp(u_opacity * (0.65 + 0.5 * rim), 0.0, 1.0);
   fragColor = vec4(lit, alpha);
 }
@@ -296,17 +271,14 @@ void main() {
 /**
  * Single-pass raycaster.
  *
- * Rays are built by unprojecting the fragment through the inverse
- * view-projection and clipped analytically against the volume box, which is
- * cheaper and more robust than the usual "render the cube's front and back
- * faces into two textures" setup, and it behaves correctly when the camera
- * moves inside the volume.
+ * Rays come from unprojecting the fragment and are clipped analytically against
+ * the volume box, rather than the usual trick of rendering the cube's front and
+ * back faces into two textures. Cheaper, and it still behaves when the camera
+ * is inside the volume.
  *
- * Opaque geometry is composited by sampling the depth texture the mesh pass
- * wrote and converting it to a distance along the ray, so each ray stops at
- * whatever surface it hits. Without that, organ surfaces and the volume would
- * not occlude each other and the 3D view would look like two unrelated images
- * stacked on top of one another.
+ * Each ray stops at the depth the mesh pass wrote, which is what makes organ
+ * surfaces and the volume occlude one another instead of looking like two
+ * unrelated images stacked together.
  */
 export const RAYCAST_FRAG = `${HEADER}
 ${COMMON}
@@ -317,13 +289,12 @@ uniform mat4  u_invViewProj;
 uniform vec3  u_cameraPos;
 uniform vec3  u_extent;
 uniform float u_stepMm;
-uniform int   u_mode;          // 0 = composite, 1 = MIP, 2 = isosurface-lit composite
+uniform int   u_mode;          // 0 = composite, 1 = MIP
 uniform float u_density;
 uniform int   u_shade;
 uniform float u_labelBoost;    // extra opacity for annotated structures
 uniform sampler2D u_sceneColor;
 uniform sampler2D u_sceneDepth;
-uniform vec2  u_near_far;
 
 // Ray/axis-aligned-box slab test. Returns false when the ray misses.
 bool intersectBox(vec3 ro, vec3 rd, vec3 boxMax, out float t0, out float t1) {

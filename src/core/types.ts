@@ -1,19 +1,14 @@
 /**
  * Shared data contracts for the viewer.
  *
- * The whole app agrees on one convention: after loading, every volume is
- * resampled into *canonical RAS voxel order*, meaning
- *
- *   i increases toward the patient's Right
- *   j increases toward Anterior
- *   k increases toward Superior
- *
- * so index math elsewhere never has to think about the source file's
- * orientation again. `NiftiImage` is what comes off disk (any orientation);
- * `Volume` is what the rest of the app consumes (always RAS).
+ * After loading, every volume is reordered into canonical RAS voxel order: i
+ * toward the patient's Right, j toward Anterior, k toward Superior. Index math
+ * elsewhere never has to think about the source file's orientation again.
+ * `NiftiImage` is what comes off disk, in any orientation; `Volume` is what the
+ * rest of the app sees, always RAS.
  */
 
-/** NIfTI datatype codes we understand (subset of the spec that occurs in practice). */
+/** The subset of the spec's datatype codes that occurs in practice. */
 export const enum NiftiDataType {
   UINT8 = 2,
   INT16 = 4,
@@ -41,7 +36,6 @@ export type TypedNumberArray =
 export type Mat4 = Float64Array;
 
 export interface NiftiHeader {
-  /** 1 for NIfTI-1, 2 for NIfTI-2. */
   version: 1 | 2;
   littleEndian: boolean;
   /** dim[0] is the dimensionality; dim[1..7] are sizes. */
@@ -60,9 +54,8 @@ export interface NiftiHeader {
   spatialUnits: number;
   description: string;
   intentName: string;
-  /** Affine chosen per the NIfTI rules: sform if set, else qform, else scaling-only. */
+  /** Per the NIfTI rules: sform if set, else qform, else scaling-only. */
   affine: Mat4;
-  /** Which of the three methods produced `affine`. Useful for the info panel. */
   affineSource: 'sform' | 'qform' | 'pixdim';
   /** 3D volumes in the file. Above 1 means a 4D series; only the first is read. */
   volumeCount: number;
@@ -75,57 +68,49 @@ export interface NiftiImage {
   data: TypedNumberArray;
 }
 
-/** Three-letter orientation code, e.g. ['R','A','S'] or ['L','P','S']. */
 export type AxisCode = 'L' | 'R' | 'A' | 'P' | 'S' | 'I';
+/** Orientation code, e.g. ['R','A','S'] or ['L','P','S']. */
 export type AxCodes = [AxisCode, AxisCode, AxisCode];
 
 /**
- * A scalar volume in canonical RAS voxel order.
- *
- * `values` holds raw stored values; apply `slope`/`intercept` to get real
- * units (Hounsfield units for CT). We keep them separate rather than
- * pre-multiplying so the HU probe can report exact values and so we do not
- * pay a float64 array for a 12M-voxel volume.
+ * A scalar volume in canonical RAS voxel order. `values` holds raw stored
+ * values; apply `slope`/`intercept` for real units (HU for CT). Not
+ * pre-multiplied, so the HU probe reports exact values and a 12M-voxel volume
+ * does not cost a float64 array.
  */
 export interface Volume {
   dims: [number, number, number];
   /** mm per voxel along i, j, k. */
   spacing: [number, number, number];
-  /** Voxel-to-world affine, already adjusted for the RAS reorientation. */
+  /** Voxel-to-world, already adjusted for the RAS reorientation. */
   affine: Mat4;
   /** Orientation of the ORIGINAL file, kept for display ("loaded as LPS"). */
   originalAxCodes: AxCodes;
-  /**
-   * How many 3D volumes the file held. More than one means a 4D series (a
-   * time course, or diffusion directions) of which only the first is loaded.
-   * The UI says so rather than letting the other frames disappear silently.
-   */
+  /** Above 1 is a 4D series; only the first frame loads, and the UI says so. */
   volumeCount: number;
   values: TypedNumberArray;
   slope: number;
   intercept: number;
-  /** Rescaled min/max, i.e. real-world units. Computed once at load. */
+  /** Rescaled, i.e. real-world units. Computed once at load. */
   min: number;
   max: number;
-  /** Physical extent in mm along each axis. */
+  /** Physical extent, mm per axis. */
   extent: [number, number, number];
 }
 
-/** One annotated structure. */
 export interface Structure {
   /** Label index in the packed label volume, 1-based. 0 is background. */
   index: number;
   /** Machine name as it appeared in the file, e.g. "kidney_left". */
   key: string;
-  /** Human label for the UI, e.g. "Kidney (left)". */
   name: string;
   /** sRGB 0-255. */
   color: [number, number, number];
   visible: boolean;
-  /** Voxel count and derived volume in millilitres. */
   voxelCount: number;
+  /** Millilitres. */
   volumeMl: number;
-  /** Mean value of the underlying scalar volume inside the mask, in HU. */
+  /** Mean of the underlying scalar volume inside the mask, in HU. */
   meanHu: number;
   /** Inclusive voxel bounding box [i0,j0,k0,i1,j1,k1] in RAS voxel order. */
   bounds: [number, number, number, number, number, number];
@@ -134,16 +119,14 @@ export interface Structure {
 }
 
 /**
- * All structures packed into one uint8 volume (so the GPU carries one texture
- * instead of N). Overlaps are resolved by area priority: smaller structures
- * win, because a big organ swallowing a small vessel reads worse than the
- * reverse.
+ * Every structure packed into one uint8 volume, so the GPU carries one texture
+ * instead of N. Overlaps go to the smaller structure: a big organ swallowing a
+ * vessel reads worse than the reverse.
  */
 export interface LabelVolume {
   dims: [number, number, number];
   spacing: [number, number, number];
   affine: Mat4;
-  /** Values are structure indices; 0 = background. */
   values: Uint8Array;
   structures: Structure[];
   /** Number of voxels claimed by more than one source mask. */
@@ -152,7 +135,7 @@ export interface LabelVolume {
 
 /** A triangle mesh produced by isosurface extraction, in world (mm) space. */
 export interface Mesh {
-  /** Structure index this mesh belongs to. */
+  /** The structure this mesh belongs to. */
   index: number;
   positions: Float32Array;
   normals: Float32Array;
@@ -162,24 +145,22 @@ export interface Mesh {
   triangleCount: number;
 }
 
-/** The three orthogonal planes, plus the 3D view. */
 export type ViewKind = 'axial' | 'coronal' | 'sagittal' | 'volume';
 
 export interface WindowLevel {
-  /** Window centre in HU. */
+  /** Centre, HU. */
   level: number;
-  /** Window width in HU. */
+  /** Width, HU. */
   window: number;
 }
 
 export interface Preset extends WindowLevel {
   id: string;
   name: string;
-  /** Keyboard digit that selects it, if any. */
   hotkey?: string;
 }
 
-/** Progress reporting from workers back to the UI. */
+/** Reported from the workers back to the UI. */
 export interface LoadProgress {
   stage: string;
   /** 0..1, or null when indeterminate. */

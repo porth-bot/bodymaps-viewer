@@ -1,10 +1,8 @@
 /**
  * Everything drawn on top of the GL canvas: crosshairs, orientation letters,
- * the scale bar, measurements and the corner readouts.
- *
- * A separate 2D canvas rather than more GL work, because text is the bulk of
- * it and Canvas2D renders text with proper hinting and subpixel positioning
- * that a texture-atlas font in GL would only approximate.
+ * scale bar, measurements, corner readouts. A 2D canvas and not more GL,
+ * because nearly all of it is text and Canvas2D hints and subpixel-positions
+ * text that a texture-atlas font in GL would only approximate.
  */
 
 import type { Structure } from '../core/types';
@@ -54,8 +52,7 @@ export class Overlay {
       this.canvas.width = w;
       this.canvas.height = h;
     }
-    // Draw in CSS pixels; the transform handles the device pixel ratio so text
-    // stays crisp on retina without every coordinate being multiplied by hand.
+    // Draw in CSS pixels; the transform absorbs the device pixel ratio.
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
@@ -131,8 +128,8 @@ export class Overlay {
     this.drawMeasurements(state, t, view, spec);
     this.drawScaleBar(t, W, H);
 
-    // Corner readouts, laid out like a clinical viewer: identity top-left,
-    // geometry bottom-left, window/level bottom-right.
+    // Corner readouts in the clinical arrangement: identity top left, geometry
+    // bottom left, window and level bottom right.
     const sliceIndex = Math.round(state.crosshair[spec.sliceAxis]);
     const nSlices = volume.dims[spec.sliceAxis];
     ctx.font = FONT;
@@ -175,8 +172,7 @@ export class Overlay {
 
     for (const m of all) {
       if (m.view !== view) continue;
-      // Only show a measurement on the slice it was drawn on. Showing them
-      // everywhere turns a busy study into spaghetti.
+      // Only on the slice it was drawn on. Everywhere is spaghetti.
       if (Math.round(m.slice) !== current) continue;
 
       const [ua, va] = voxelToPlaneUv(spec, dims, m.a);
@@ -212,9 +208,8 @@ export class Overlay {
   }
 
   /**
-   * Scale bar with a 1/2/5 step. A bar is more honest than printing a zoom
-   * percentage, because it stays correct no matter how the browser scales the
-   * canvas.
+   * Scale bar with a 1/2/5 step. A bar stays correct however the browser
+   * scales the canvas; a zoom percentage does not.
    */
   private drawScaleBar(
     t: ReturnType<Renderer['viewTransformFor']>,
@@ -275,11 +270,7 @@ export class Overlay {
     this.drawAxisGizmo(camera, rect);
   }
 
-  /**
-   * Small R/A/S axis indicator. It is the fastest way to answer "which side am
-   * I looking at" in a 3D view, and it stays readable where an orientation
-   * cube would need real geometry.
-   */
+  /** Small R/A/S axis indicator. */
   private drawAxisGizmo(camera: OrbitCamera, rect: ViewportRect): void {
     const ctx = this.ctx;
     const cx = rect.width - 46;
@@ -289,13 +280,11 @@ export class Overlay {
     const az = camera.azimuth;
     const el = camera.elevation;
 
-    // Project each anatomical axis into the camera's screen basis. This mirrors
-    // the lookAt the renderer uses, so the gizmo can never disagree with the
-    // scene it labels.
-    //
-    // `right` is cross(forward, worldUp) normalised, which for worldUp = +S
-    // reduces to (-cos az, sin az, 0). Getting that sign backwards mirrors the
-    // gizmo, and a left/right indicator that lies is worse than none at all.
+    // Screen basis built the same way as the renderer's lookAt, so the gizmo
+    // cannot disagree with the scene it labels. `right` is cross(forward, +S)
+    // normalised, which reduces to (-cos az, sin az, 0). That sign backwards
+    // mirrors the gizmo, and a left/right indicator that lies is worse than
+    // none at all.
     const ce = Math.cos(el), se = Math.sin(el);
     const sa = Math.sin(az), ca = Math.cos(az);
     const forward: [number, number, number] = [-sa * ce, -ca * ce, -se];
@@ -321,11 +310,9 @@ export class Overlay {
       const sy = a.v[0] * up[0] + a.v[1] * up[1] + a.v[2] * up[2];
       const depth = a.v[0] * forward[0] + a.v[1] * forward[1] + a.v[2] * forward[2];
 
-      // Which letter goes where is decided purely by which end of the axis it
-      // is: the +v end is always the positive letter. Depth only controls the
-      // fade, so the arm pointing away from the camera recedes. Letting depth
-      // choose the letter instead mirrors the gizmo whenever an axis tips past
-      // the camera plane, which is exactly when a viewer relies on it.
+      // The +v end always gets the positive letter; depth only sets the fade.
+      // Choosing the letter from depth instead mirrors the gizmo whenever an
+      // axis tips past the camera plane, which is when a viewer relies on it.
       for (const end of [1, -1] as const) {
         const near = end * depth < 0;
         ctx.globalAlpha = near ? 1 : 0.3;

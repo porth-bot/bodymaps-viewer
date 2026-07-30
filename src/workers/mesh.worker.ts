@@ -1,11 +1,8 @@
 /// <reference lib="webworker" />
 /**
- * Builds one organ surface at a time from the packed label volume.
- *
- * The worker is initialised once with a copy of the label volume, then handles
- * per-structure build requests. Sending the volume once instead of per request
- * matters: it is 12 MB, and a pool of three workers re-cloning it for nine
- * organs would move 300 MB around for no reason.
+ * Builds one organ surface at a time from the packed label volume. Initialised
+ * once with a copy of the volume rather than getting it per request: it is
+ * 12 MB, and three workers re-cloning it for nine organs move 300 MB.
  */
 
 import { extractOrganMesh } from '../mesh/surfaceNets';
@@ -49,7 +46,7 @@ let dims: [number, number, number] | null = null;
 let spacing: [number, number, number] | null = null;
 let labels: Uint8Array | null = null;
 
-/** Scratch mask, reused across builds so nine organs do not mean nine 12 MB allocations. */
+/** Scratch mask, reused so nine organs are not nine 12 MB allocations. */
 let scratch: Uint8Array | null = null;
 
 ctx.onmessage = (event: MessageEvent<MeshInit | MeshBuildRequest>) => {
@@ -72,9 +69,8 @@ ctx.onmessage = (event: MessageEvent<MeshInit | MeshBuildRequest>) => {
 
     const t0 = performance.now();
 
-    // Only the bounding box needs clearing and filling. Touching the whole
-    // 12 million voxel array for a 29 mL aorta would cost more than the mesh
-    // extraction itself.
+    // Only the bounding box gets cleared and filled. Touching all 12 million
+    // voxels for a 29 mL aorta costs more than the extraction itself.
     const [i0, j0, k0, i1, j1, k1] = msg.bounds;
     if (i1 < i0 || j1 < j0 || k1 < k0) {
       ctx.postMessage({
@@ -97,12 +93,11 @@ ctx.onmessage = (event: MessageEvent<MeshInit | MeshBuildRequest>) => {
       }
     }
 
-    // These masks come out of a model that segments axially, so adjacent
-    // slices disagree slightly and the raw isosurface terraces along z, which
-    // 2.5 mm spacing makes very visible. Three blur passes plus a longer
-    // Taubin run flattens the steps. Taubin is volume preserving, so the
-    // extra iterations cost shape fidelity far more slowly than plain
-    // Laplacian smoothing would.
+    // These masks come out of a model that segments axially, so adjacent slices
+    // disagree slightly and the raw isosurface terraces along z, which 2.5 mm
+    // spacing makes very visible. Three blur passes plus a longer Taubin run
+    // flattens the steps, and Taubin is volume preserving, so the extra
+    // iterations cost shape fidelity far more slowly than Laplacian would.
     const mesh = extractOrganMesh({
       mask: scratch,
       dims,

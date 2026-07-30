@@ -1,52 +1,15 @@
 /**
  * Naive surface nets (dual contouring on the cell grid) for binary organ masks.
  *
- * Chosen over marching cubes on purpose:
+ * Not marching cubes: no 256-entry case table to mistranscribe, every
+ * sign-changing grid edge emits exactly one quad so the mesh is closed and
+ * consistently oriented by construction, and one centred vertex per cell avoids
+ * the slivers marching cubes leaves on a blurred mask. The price is that sharp
+ * features get rounded off, which for anatomy is the right trade.
  *
- *   - No 256-entry case table. Marching cubes needs a hand-transcribed lookup
- *     table whose errors show up as single missing triangles, which are close
- *     to impossible to spot by eye and painful to debug. The cube topology here
- *     is derived from two small tables of cube edges and faces instead.
- *   - Manifold. Every sign-changing grid edge emits exactly one quad joining
- *     the four cells around it, so the result is closed and consistently
- *     oriented with no boundary and no ambiguous-face special cases.
- *   - Better triangle quality on label fields. Marching cubes on a blurred
- *     binary mask produces long slivers wherever a crossing sits near a corner;
- *     the dual formulation puts one well-centred vertex per cell instead.
- *
- * The trade is that surface nets does not reproduce sharp features, which is
- * exactly right for anatomy.
- *
- * One refinement over the textbook version is needed to make "manifold" true
- * rather than nearly true. A cell normally emits a single vertex, but the
- * surface can pass through one cell as two disjoint sheets, and collapsing both
- * onto one vertex produces an edge shared by four triangles. That is not
- * hypothetical: the reference liver mask hits it seven times. So each cell is
- * partitioned into its surface components first (see `pairFaceCrossings`) and
- * emits one vertex per component. In the overwhelmingly common case there is
- * exactly one component and this costs nothing but the bookkeeping. With it, all
- * nine reference organ masks come out strictly manifold at full resolution and
- * the default blur.
- *
- * Known limit: one pathological case survives, where a single surface component
- * of a cell leaves and re-enters through the same ambiguous face. Splitting that
- * cell would mean cutting the component at some other face, which the
- * neighbouring cell across that face would not agree to, and the mesh would gain
- * a boundary instead. Properly fixing it means subdividing the cell, which is
- * what manifold dual contouring does and what this deliberately does not. It
- * needs field detail comparable to the sample spacing to occur at all, so it is
- * rare but not absent from the reference data. At full resolution only the liver
- * hits it, and only at the three blur passes the app runs, costing two edges out
- * of 337k. Decimated previews sample coarsely enough to meet it more often: the
- * pancreas does at strides 2, 3 and 4, always for one or two edges. When it
- * happens the mesh is still closed and consistently oriented, so normals and the
- * divergence-theorem volume stay correct (the liver still measures to within
- * 0.3% of its voxel count). Only the "exactly two triangles per edge" property
- * is lost, at those edges.
- *
- * COORDINATE CONTRACT: everything here works in "volume local millimetres",
- * defined as voxelIndex * spacing with the origin at voxel (0,0,0). The world
- * affine is deliberately not applied; the renderer stays in this local space.
+ * Coordinates are volume local millimetres: voxelIndex * spacing, origin at
+ * voxel (0,0,0). The world affine is deliberately not applied, the renderer
+ * stays in this local space.
  */
 
 import { boxBlur3 } from './blur';
@@ -85,7 +48,7 @@ const EDGE_B = new Int32Array([
 ]);
 
 /**
- * The six cube faces, each as a cycle of four corners and the matching cycle of
+ * The six cube faces, each a cycle of four corners plus the matching cycle of
  * four edges, where FACE_EDGES[f*4+n] joins FACE_CORNERS[f*4+n] to the corner
  * after it. Order: k=0, k=1, j=0, j=1, i=0, i=1.
  */
@@ -107,17 +70,15 @@ const FACE_EDGES = new Int32Array([
 ]);
 
 /**
- * Local cube-edge id of a grid edge as seen from each of the four cells that
- * share it, listed in the same order as the quad those cells form. Derived
- * from the corner numbering: the grid edge at sample (i,j,k) along +x is the
- * cell-local edge between corners 0 and 1 of cell (i,j,k), between corners 2
- * and 3 of cell (i,j-1,k), and so on.
+ * Local cube-edge id of a grid edge as seen from each of the four cells sharing
+ * it, in the same order as the quad those cells form. Falls out of the corner
+ * numbering: the +x grid edge at (i,j,k) runs between corners 0 and 1 of cell
+ * (i,j,k), corners 2 and 3 of cell (i,j-1,k), and so on.
  */
 const QUAD_LOCAL_EDGE_X = [3, 2, 0, 1] as const;
 const QUAD_LOCAL_EDGE_Y = [7, 5, 4, 6] as const;
 const QUAD_LOCAL_EDGE_Z = [11, 10, 8, 9] as const;
 
-/** Growable Float32 backing store for interleaved xyz positions. */
 class FloatBuffer {
   data: Float32Array;
   length = 0;
@@ -139,7 +100,6 @@ class FloatBuffer {
   }
 }
 
-/** Growable Uint32 backing store for triangle indices. */
 class IndexBuffer {
   data: Uint32Array;
   length = 0;
@@ -169,23 +129,32 @@ class IndexBuffer {
 /**
  * Split a cell's sign-changing cube edges into surface components.
  *
- * The surface inside one cell is a set of closed loops, and each loop is a
- * cycle of crossing cube edges: two crossing edges are consecutive on a loop
- * when they are joined by an arc across a shared cube face. Every face carries
- * an even number of crossings, so pairing them up on all six faces and taking
- * connected components recovers the loops without ever consulting a case table.
+ * A cell would emit one vertex, except the surface can pass through it as two
+ * disjoint sheets, and collapsing both onto one vertex leaves an edge shared by
+ * four triangles. The reference liver mask hits that seven times, so cells emit
+ * one vertex per component instead.
  *
- * A face with two crossings has only one possible pairing. A face with four is
- * the classic ambiguous case: its two inside corners sit diagonally, and the
- * surface can either pinch them apart or join them through the middle. That is
- * decided with the asymptotic decider, the saddle value of the bilinear
- * interpolant on the face. The decision depends only on the four face corner
- * values, so the two cells sharing the face always agree, which is exactly what
- * keeps the two dual meshes stitching together into a manifold.
+ * The surface inside a cell is a set of closed loops, and two crossing edges are
+ * consecutive on a loop when an arc across a shared face joins them. Every face
+ * carries an even number of crossings, so pairing them on all six faces and
+ * taking connected components recovers the loops with no case table. Four
+ * crossings on a face is the classic ambiguous case, settled by the asymptotic
+ * decider, the saddle value of the bilinear interpolant on the face: it reads
+ * only the four face corner values, so both cells sharing that face always
+ * decide the same way, and that agreement is what stitches the two dual meshes
+ * into a manifold. `parent` comes back as a union-find over the 12 edge slots,
+ * at most four components (the shortest loop uses three edges).
  *
- * Fills `parent` as a union-find over the 12 edge slots. A cell has at most
- * four components, since the shortest possible loop cuts off a single corner
- * and so uses three edges.
+ * One pathological case survives: a component that leaves and re-enters through
+ * the same ambiguous face. Cutting it anywhere else needs the neighbour across
+ * that face to agree, and it will not, so the mesh gains a boundary instead of a
+ * fix. Subdividing the cell is the real answer, and that is manifold dual
+ * contouring, deliberately not this. It takes field detail near the sample
+ * spacing, so at full resolution only the liver hits it, two edges out of 337k;
+ * decimated previews meet it more often (pancreas, strides 2 to 4, one or two
+ * edges). The mesh is still closed and consistently oriented, so normals and the
+ * divergence-theorem volume hold (liver within 0.3% of voxel count); only
+ * "exactly two triangles per edge" is lost, at those edges.
  */
 function pairFaceCrossings(g: Float64Array, crossMask: number, parent: Int32Array): void {
   for (let e = 0; e < 12; e++) parent[e] = e;
@@ -203,7 +172,6 @@ function pairFaceCrossings(g: Float64Array, crossMask: number, parent: Int32Arra
       ((crossMask >> e3) & 1);
     if (crossings === 0) continue;
 
-    // Two crossings admit only one pairing, so simply chain them together.
     if (crossings === 2) {
       let first = -1;
       for (let n = 0; n < 4; n++) {
@@ -215,9 +183,9 @@ function pairFaceCrossings(g: Float64Array, crossMask: number, parent: Int32Arra
       continue;
     }
 
-    // Ambiguous face. Corners are g0..g3 in cycle order, edge e0 joins g0 to
-    // g1 and so on, so pairing (e0,e1) and (e2,e3) cuts corners 1 and 3 off
-    // individually, while pairing (e1,e2) and (e3,e0) cuts off 0 and 2.
+    // Ambiguous face. Corners are g0..g3 in cycle order and edge e0 joins g0 to
+    // g1, so pairing (e0,e1) and (e2,e3) cuts corners 1 and 3 off individually,
+    // while pairing (e1,e2) and (e3,e0) cuts off 0 and 2.
     const g0 = g[FACE_CORNERS[fe]];
     const g1 = g[FACE_CORNERS[fe + 1]];
     const g2 = g[FACE_CORNERS[fe + 2]];
@@ -256,26 +224,18 @@ function union(parent: Int32Array, a: number, b: number): void {
 /**
  * Extract the `isoValue` isosurface of `field`.
  *
- * Two phases share one cell loop:
- *
- *   1. Cell vertices. A cell is the 2x2x2 block of samples at (i..i+1,
- *      j..j+1, k..k+1). If its 8 corners are not all on the same side of the
- *      isovalue the cell straddles the surface: every sign-changing cube edge
- *      contributes its linearly interpolated crossing point, and the cell emits
- *      one vertex per surface component at the average of that component's
- *      crossings.
- *   2. Faces. Each grid edge that changes sign is shared by exactly four cells,
- *      all of which are guaranteed to have emitted a vertex (they all contain
- *      the crossing edge). Those four vertices form one quad of the surface.
+ * A cell is the 2x2x2 sample block at (i..i+1, j..j+1, k..k+1), and one whose
+ * corners straddle the isovalue emits a vertex per surface component at the mean
+ * of that component's interpolated crossings. Each sign-changing grid edge is
+ * then shared by four cells, all of which contain it and so have a vertex, and
+ * those four are one quad.
  *
  * Winding is counter-clockwise seen from outside, where inside means
  * field > isoValue, so the outward normal points down-gradient.
  *
- * Memory is proportional to a slice, not to the volume: the cell -> vertex
- * lookup is a rolling pair of (nx-1)*(ny-1) buffers rather than a full-volume
- * array. Each cell needs two words there, the index of its first vertex and a
- * 2-bit-per-edge map from cube edge to component, which is enough to answer
- * "which of this cell's vertices does that grid edge belong to".
+ * Memory scales with a slice, not the volume: the cell -> vertex lookup is a
+ * rolling pair of (nx-1)*(ny-1) buffers holding two words per cell, the index of
+ * its first vertex and a 2-bit-per-edge map from cube edge to component.
  */
 export function surfaceNets(input: SurfaceNetsInput): RawMesh {
   const { field, dims, spacing, isoValue, origin } = input;
@@ -306,8 +266,8 @@ export function surfaceNets(input: SurfaceNetsInput): RawMesh {
   const [sx, sy, sz] = spacing;
   const [ox, oy, oz] = origin;
 
-  // A closed surface through a box of cells has roughly one vertex per surface
-  // cell; seed with the area of the largest face so typical organs never grow.
+  // Roughly one vertex per surface cell, so the largest face area seeds it and
+  // typical organs never grow the buffers.
   const seedVertices = Math.min(1 << 20, Math.max(1024, cnx * cny));
   const positions = new FloatBuffer(seedVertices * 3);
   const indices = new IndexBuffer(seedVertices * 6);
@@ -318,8 +278,8 @@ export function surfaceNets(input: SurfaceNetsInput): RawMesh {
   let curBase = new Int32Array(sliceCells);
   let curMap = new Int32Array(sliceCells);
 
-  // Per-cell scratch, allocated once. `g` holds corner values relative to the
-  // isovalue so the sign tests and the face decider agree by construction.
+  // `g` is corner values relative to the isovalue, so the sign tests and the
+  // face decider agree by construction.
   const g = new Float64Array(8);
   const parent = new Int32Array(12);
   const componentOfRoot = new Int32Array(12);
@@ -338,11 +298,9 @@ export function surfaceNets(input: SurfaceNetsInput): RawMesh {
       for (let i = 0; i < cnx; i++) {
         const slot = cellRow + i;
         const base = rowBase + i;
-        // Sign test only. Nearly every cell in a volume is discarded on the
-        // next line (97% of the reference liver crop), and filling `g` for
-        // those was a quarter of this pass. fl(a - b) > 0 is exactly a > b for
-        // doubles, so the comparison alone decides it, and the cells that
-        // survive fetch the values below.
+        // Sign test only: 97% of the reference liver crop dies on the next line
+        // and filling `g` for those cells was a quarter of this pass. Safe
+        // because fl(a - b) > 0 is exactly a > b for doubles.
         let mask = 0;
         for (let c = 0; c < 8; c++) {
           if (field[base + cornerOffset[c]] > isoValue) mask |= 1 << c;
@@ -354,8 +312,6 @@ export function surfaceNets(input: SurfaceNetsInput): RawMesh {
         }
         for (let c = 0; c < 8; c++) g[c] = field[base + cornerOffset[c]] - isoValue;
 
-        // Interpolate the crossings. Only surface cells reach this point, so
-        // everything below scales with surface area, not with volume.
         let crossMask = 0;
         for (let e = 0; e < 12; e++) {
           const a = EDGE_A[e];
@@ -412,10 +368,9 @@ export function surfaceNets(input: SurfaceNetsInput): RawMesh {
         curBase[slot] = vertexBase;
         curMap[slot] = edgeToComponent;
 
-        // Quads for the three grid edges leaving corner 0 of this cell. Corner
-        // 0 is inside when bit 0 of the mask is set, and that decides which way
-        // round the four neighbouring cells are wound: the orders below have
-        // their normal along +x, +y and +z, which is the outward direction
+        // Quads for the three grid edges leaving corner 0. Which way round the
+        // four neighbouring cells are wound depends on corner 0 being inside:
+        // the orders below have their normal along +x, +y and +z, outward
         // exactly when corner 0 is the inside end of the crossing.
         const inside0 = (mask & 1) !== 0;
 
@@ -467,13 +422,11 @@ function vertexAt(
 }
 
 /**
- * Area-weighted vertex normals.
- *
- * The un-normalised triangle cross product has length 2*area, so accumulating
- * it directly weights each face by its area. That matters here because surface
- * nets emits dense clusters of tiny triangles wherever the surface bends: with
- * per-face unit normals those clusters would outvote the large flat faces they
- * border and visibly tilt the shading across smooth regions.
+ * Area-weighted vertex normals. The un-normalised cross product has length
+ * 2*area, so accumulating it raw is the weighting, and it has to be weighted:
+ * surface nets emits dense clusters of tiny triangles wherever the surface
+ * bends, and with unit face normals those clusters outvote the large flat faces
+ * they border and visibly tilt the shading across smooth regions.
  */
 export function computeNormals(positions: Float32Array, indices: Uint32Array): Float32Array {
   const normals = new Float32Array(positions.length);
@@ -531,11 +484,7 @@ export function meshBounds(
 }
 
 export interface ExtractOrganMeshOptions {
-  /**
-   * Full-volume mask; any non-zero value inside `bounds` counts as inside.
-   * Voxels outside `bounds` are never read, so a scratch buffer shared between
-   * structures does not need clearing beyond the box it is filled with.
-   */
+  /** Full-volume mask; any non-zero value inside `bounds` counts as inside. */
   mask: Uint8Array;
   dims: [number, number, number];
   spacing: [number, number, number];
@@ -575,25 +524,20 @@ function emptyMesh(): OrganMesh {
 /**
  * Mask -> smooth closed triangle mesh, in volume local mm.
  *
- * The mask is cropped to its bounding box padded by the blur radius (times the
- * decimation stride), converted to a Float32 occupancy field, blurred, run
- * through surface nets at 0.5, Taubin smoothed, and normalled. No welding step
- * is needed: surface nets already emits exactly one shared vertex per cell.
+ * Crop, occupancy field, blur, surface nets at 0.5, Taubin smooth, normals. No
+ * welding step: surface nets already emits one shared vertex per cell.
  *
  * The padding is what keeps the mesh closed, so it has to be at least as wide as
  * the blur reaches (one voxel per pass) or the blurred field is still above the
- * isovalue at the array border and the surface runs off the edge of it. It is
- * applied in field space and samples outside the volume read as background
- * rather than being clamped away, because organ masks routinely touch the scan
- * boundary (the liver in the reference case starts at k = 0) and a clamped crop
- * would leave the surface open right there, breaking both manifoldness and any
- * volume measurement.
+ * isovalue at the array border and the surface runs off it. Samples outside the
+ * volume read as background rather than clamped, because organ masks routinely
+ * touch the scan boundary (the reference liver starts at k = 0) and a clamped
+ * crop would leave the surface open right there.
  *
  * Nothing outside `bounds` is read. That is a contract, not an optimisation:
- * callers hand over a mask buffer they share between structures, and a halo of
- * whatever the previous structure left behind would be welded straight onto this
- * mesh (the pancreas box has eleven thousand stomach voxels within two voxels of
- * it).
+ * callers share one mask buffer between structures, and a halo of whatever the
+ * previous structure left behind would be welded straight onto this mesh (the
+ * pancreas box has eleven thousand stomach voxels within two voxels of it).
  */
 export function extractOrganMesh(opts: ExtractOrganMeshOptions): OrganMesh {
   const { mask, dims, spacing, bounds } = opts;
@@ -603,9 +547,9 @@ export function extractOrganMesh(opts: ExtractOrganMeshOptions): OrganMesh {
 
   const [nx, ny, nz] = dims;
   const voxelCount = nx * ny * nz;
-  // Out-of-range reads on a typed array give undefined, and `undefined !== 0`
-  // is true, so a short mask would be meshed as solid tissue instead of
-  // failing. Catch it here rather than shipping fabricated anatomy.
+  // Out-of-range reads on a typed array give undefined, and `undefined !== 0` is
+  // true, so a short mask would mesh as solid tissue instead of failing. Catch
+  // it here rather than shipping fabricated anatomy.
   if (mask.length < voxelCount) {
     throw new Error(`extractOrganMesh: mask has ${mask.length} voxels, dims need ${voxelCount}`);
   }
@@ -620,8 +564,7 @@ export function extractOrganMesh(opts: ExtractOrganMeshOptions): OrganMesh {
   const blurPasses = blurPassesForStride(requestedPasses, stride);
   const pad = Math.max(2, blurPasses) * stride;
   const lo: [number, number, number] = [i0 - pad, j0 - pad, k0 - pad];
-  // Round the crop up to a whole number of stride blocks so the coarse grid is
-  // exact; the slack lands inside the zero padding and costs nothing.
+  // Round up to whole stride blocks; the slack lands in the zero padding.
   const coarse: [number, number, number] = [
     Math.ceil((i1 + pad - lo[0] + 1) / stride),
     Math.ceil((j1 + pad - lo[1] + 1) / stride),
@@ -648,12 +591,11 @@ export function extractOrganMesh(opts: ExtractOrganMeshOptions): OrganMesh {
     });
 
   let raw = meshAtBlur(blurPasses);
-  // The blur runs before the threshold, so a structure thinner than about
-  // 2 * blurPasses voxels never reaches the isovalue anywhere and comes back as
-  // an empty mesh, byte for byte what an empty mask returns. Drop the blur
-  // rather than the structure. Backing it off one pass at a time instead would
-  // keep whichever sliver survives, and that sliver is not the structure: a
-  // 3-voxel cube meshes at 11% of its volume at one pass and 72% at none.
+  // Blur before threshold means anything thinner than about 2 * blurPasses
+  // voxels never reaches the isovalue and comes back empty, byte for byte what
+  // an empty mask returns. Drop the blur, not the structure. Backing off one
+  // pass at a time keeps whichever sliver survives, and that sliver is not the
+  // structure: a 3-voxel cube meshes at 11% of its volume at one pass, 72% at none.
   if (raw.indices.length === 0 && blurPasses > 0 && maxSample(field) > ISO_VALUE) {
     raw = meshAtBlur(0);
   }
@@ -670,16 +612,14 @@ export function extractOrganMesh(opts: ExtractOrganMeshOptions): OrganMesh {
 }
 
 /**
- * Blur passes to run on a stride-`s` grid so the smoothing matches what
- * `passes` would do at full resolution.
+ * Blur passes on a stride-`s` grid matching what `passes` would do at full
+ * resolution. A radius-1 box pass has variance 2/3 in grid units, so (2/3)s^2
+ * whole voxels, and the s^3 block average contributes (s^2 - 1)/12 on its own.
  *
- * One radius-1 box pass has variance 2/3 in grid units, which is (2/3)s^2 whole
- * voxels, and the s^3 block average already contributes (s^2 - 1)/12 by itself.
- * Holding the total where full resolution puts it is what keeps a preview the
- * size of the mesh it stands in for: the 0.5 crossing of a blurred field moves
- * inward on a convex boundary in proportion to the blur variance, so keeping the
- * pass count fixed instead cost the gall bladder 80% of its volume at stride 4
- * where the decimation alone costs 17%. At stride 1 this returns `passes`.
+ * Matching total variance is what keeps a preview the size of the mesh it stands
+ * in for: the 0.5 crossing moves inward on a convex boundary in proportion to
+ * the variance, so a fixed pass count cost the gall bladder 80% of its volume at
+ * stride 4, where decimation alone costs 17%.
  */
 function blurPassesForStride(passes: number, stride: number): number {
   const perPass = (2 / 3) * stride * stride;
@@ -687,7 +627,6 @@ function blurPassesForStride(passes: number, stride: number): number {
   return Math.max(0, Math.round(((2 / 3) * passes - fromBlocks) / perPass));
 }
 
-/** Largest sample in a field, for deciding whether anything was there at all. */
 function maxSample(field: Float32Array): number {
   let max = -Infinity;
   for (let i = 0; i < field.length; i++) if (field[i] > max) max = field[i];
@@ -696,16 +635,13 @@ function maxSample(field: Float32Array): number {
 
 /**
  * Crop the mask into a Float32 occupancy field, averaging each stride^3 block.
- *
- * Block averaging rather than point sampling for the decimated case: a binary
- * mask point-sampled at stride 2 or more loses thin structures outright (the
- * aorta is barely three voxels across in plane) and aliases the rest into
- * blocky noise. The average costs one pass over the crop, which is the cheap
- * part next to blurring and meshing.
+ * Averaging rather than point sampling because a binary mask point-sampled at
+ * stride 2 or more loses thin structures outright (the aorta is barely three
+ * voxels across in plane) and aliases the rest into blocky noise.
  *
  * Voxels outside the volume and voxels outside `clip` both read as background:
- * the first is what guarantees the zero border the isosurface needs to close,
- * the second is what keeps a shared mask buffer's leftovers out of the mesh.
+ * the first is the zero border the isosurface needs to close, the second keeps a
+ * shared mask buffer's leftovers out of the mesh.
  */
 function sampleOccupancy(
   mask: Uint8Array,
@@ -720,11 +656,7 @@ function sampleOccupancy(
     : blockOccupancy(mask, dims, clip, lo, coarse, stride);
 }
 
-/**
- * Full-resolution crop: one sample per voxel, so the whole job is copying the
- * clipped box into the middle of a zeroed field. Walking the source box rather
- * than the destination grid keeps the padding out of the loop entirely.
- */
+/** Walks the source box, not the destination grid, so padding never enters the loop. */
 function cropOccupancy(
   mask: Uint8Array,
   dims: [number, number, number],
@@ -759,7 +691,6 @@ function cropOccupancy(
   return field;
 }
 
-/** Decimated crop: each sample is the mean of its stride^3 block. */
 function blockOccupancy(
   mask: Uint8Array,
   dims: [number, number, number],
@@ -777,8 +708,7 @@ function blockOccupancy(
   const planeStride = nx * ny;
   const invBlock = 1 / (stride * stride * stride);
 
-  // A column's span of source voxels depends only on cx, so the clamping runs
-  // once per column instead of once per sample of every row.
+  // A column's source span depends only on cx, so clamp once per column.
   const colStart = new Int32Array(cnx);
   const colCount = new Int32Array(cnx);
   for (let cx = 0; cx < cnx; cx++) {

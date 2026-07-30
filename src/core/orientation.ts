@@ -1,14 +1,9 @@
 /**
- * Voxel-order canonicalisation.
- *
- * NIfTI world space is RAS+ (+x Right, +y Anterior, +z Superior), but the
- * voxel axes can point any which way. Everything downstream assumes canonical
- * RAS voxel order, so exactly one place in the app has to think about this:
- * here.
- *
- * The reorientation is a pure permute-and-flip. It never resamples, so voxel
- * values are preserved bit for bit and an oblique affine stays oblique (its
- * columns are only reordered and negated).
+ * Voxel-order canonicalisation. NIfTI world space is RAS+ (+x Right, +y
+ * Anterior, +z Superior) but the voxel axes can point any which way, and
+ * everything downstream assumes canonical RAS, so this is the one place that
+ * has to think about it. Pure permute and flip, never a resample: values
+ * survive bit for bit and an oblique affine stays oblique.
  */
 
 import { mat4Multiply } from './mat4';
@@ -26,12 +21,9 @@ interface AxisMapping {
 }
 
 /**
- * Match each voxel axis to a distinct world axis.
- *
- * Taking the per-column argmax independently can hand two voxel axes the same
- * world axis on an oblique affine, which would produce a nonsense code like
- * ['R','R','S']. Assigning the strongest correspondences first and letting the
- * weaker ones take what is left makes the result a permutation by
+ * Per-column argmax taken independently can hand two voxel axes the same world
+ * axis on an oblique affine, giving a nonsense code like ['R','R','S'].
+ * Strongest correspondences first makes the result a permutation by
  * construction.
  */
 function axisMapping(affine: Mat4): AxisMapping {
@@ -71,7 +63,7 @@ interface ReorientPlan {
   outDims: [number, number, number];
   axCodes: AxCodes;
   affine: Mat4;
-  /** True when the file is already RAS and no data movement is needed. */
+  /** File is already RAS; no data movement needed. */
   identity: boolean;
 }
 
@@ -97,8 +89,8 @@ function planReorient(image: NiftiImage): ReorientPlan {
     inDims[srcAxis[2]],
   ];
 
-  // Voxel-space change of basis: new index -> old index. Composing it on the
-  // right of the old affine keeps every voxel mapping to the same world point.
+  // Voxel change of basis, new index -> old. Composed on the right so every
+  // voxel keeps mapping to the same world point.
   const t = new Float64Array(16);
   for (let out = 0; out < 3; out++) {
     const src = srcAxis[out];
@@ -121,17 +113,12 @@ function planReorient(image: NiftiImage): ReorientPlan {
 }
 
 function allocateLike(source: TypedNumberArray, length: number): TypedNumberArray {
-  // TypedArray constructors are not related by any TS-visible interface, so
-  // the concrete one is taken off the instance.
+  // TypedArray constructors share no TS-visible interface, so take it off the instance.
   const ctor = source.constructor as new (n: number) => TypedNumberArray;
   return new ctor(length);
 }
 
-/**
- * Single pass over the output in memory order. The source index is advanced by
- * precomputed per-axis steps, so the inner loop is one add and one copy with
- * no per-voxel branching or multiplication.
- */
+/** One pass in output memory order, steps precomputed so the inner loop never branches. */
 function applyPlan(data: TypedNumberArray, plan: ReorientPlan): TypedNumberArray {
   if (plan.identity) return data;
 
@@ -173,9 +160,9 @@ function rescaledRange(values: TypedNumberArray, slope: number, intercept: numbe
   let rawMax = -Infinity;
   for (let i = 0; i < values.length; i++) {
     const v = values[i];
-    // Derived float maps carry both NaN and +/-Infinity, and both have to go:
-    // min/max feed the window/level autoscaling, so one infinity there flattens
-    // the whole display. Comparison alone would only drop the NaN.
+    // Derived float maps carry NaN and +/-Infinity alike, and both have to go:
+    // these feed window/level autoscaling, where one infinity flattens the
+    // display. Comparison alone would only drop the NaN.
     if (!Number.isFinite(v)) continue;
     if (v < rawMin) rawMin = v;
     if (v > rawMax) rawMax = v;
@@ -205,7 +192,7 @@ export function reorientToRAS(image: NiftiImage): Volume {
     intercept,
     min,
     max,
-    // Field of view, so a bounding box drawn from it encloses whole voxels.
+    // Field of view, so a bounding box from it encloses whole voxels.
     extent: [plan.outDims[0] * spacing[0], plan.outDims[1] * spacing[1], plan.outDims[2] * spacing[2]],
   };
 }
@@ -213,11 +200,9 @@ export function reorientToRAS(image: NiftiImage): Volume {
 const GRID_TOLERANCE_MM = 1e-3;
 
 /**
- * Reorient a mask onto the grid of an already-canonical reference volume.
- *
- * Returns bare values rather than a Volume because a mask has no meaningful
- * window, spacing of its own, or intensity range: it borrows all of that from
- * the reference it is being drawn over.
+ * Reorient a mask onto an already-canonical reference grid. Returns bare
+ * values, not a Volume: a mask borrows window, spacing and intensity range
+ * from the scan it is drawn over.
  */
 export function reorientLike(image: NiftiImage, reference: Volume): TypedNumberArray {
   const plan = planReorient(image);
@@ -238,10 +223,9 @@ export function reorientLike(image: NiftiImage, reference: Volume): TypedNumberA
   for (let i = 0; i < 16; i++) {
     const diff = Math.abs(plan.affine[i] - reference.affine[i]);
     if (Number.isNaN(diff)) {
-      // NaN loses every comparison, so it needs its own arm: left to the
-      // accumulator below, the affine that should be rejected hardest (one that
-      // cannot be compared at all) would leave `worst` at 0 and pass as an
-      // exact match, and the mask would be drawn at an unknown position.
+      // NaN loses every comparison, so it needs its own arm. Left to the
+      // accumulator it would keep `worst` at 0 and pass as an exact match, and
+      // the mask would be drawn at an unknown position.
       throw new Error(
         `Grid mismatch: mask affine holds ${plan.affine[i]} at row ${Math.floor(i / 4)} col ` +
           `${i % 4} against the reference's ${reference.affine[i]}, so the mask's world ` +

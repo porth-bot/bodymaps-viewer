@@ -1,10 +1,8 @@
 /**
- * Packs a set of per-structure binary masks into a single uint8 label volume.
- *
- * The alternative, one 3D texture per structure, does not scale: this sample
- * case alone would be nine 12 MB textures and nine texture fetches per
- * raycast sample. One packed volume plus a 256-entry lookup table gives the
- * same result with a single fetch, and toggling a structure rewrites 1 KB.
+ * Packs per-structure binary masks into one uint8 label volume. A 3D texture
+ * per structure does not scale: this case alone would be nine 12 MB textures
+ * and nine fetches per raycast sample, against one fetch plus a 256-entry
+ * lookup table, where toggling a structure rewrites 1 KB.
  */
 
 import type { LabelVolume, Structure, TypedNumberArray, Volume } from './types';
@@ -16,26 +14,17 @@ export interface MaskInput {
   /** Already reoriented to the reference volume's RAS grid. */
   values: TypedNumberArray;
   /**
-   * Which value counts as inside. Undefined means any non-zero value, which is
-   * the binary-mask case.
-   *
-   * A combined multi-label file (one volume holding values 1..N, which is what
-   * TotalSegmentator emits by default) becomes N MaskInputs that all share the
-   * same `values` array and differ only here. Splitting it into N real arrays
-   * instead would cost 12 MB each, so a 117-structure TotalSegmentator output
-   * would need well over a gigabyte to say the same thing.
+   * Which value counts as inside; undefined means any non-zero, the binary
+   * mask case. A combined multi-label file (values 1..N in one volume, what
+   * TotalSegmentator emits by default) becomes N MaskInputs sharing one
+   * `values` array. Splitting into N real arrays would cost 12 MB each, so 117
+   * structures would need well over a gigabyte to say the same thing.
    */
   matchValue?: number;
 }
 
-/**
- * Distinct non-zero values in a volume, for deciding whether a file is a binary
- * mask or a combined multi-label map.
- *
- * Stops early once the count exceeds `limit`, because a continuous-valued
- * volume handed in by mistake would otherwise build a set with millions of
- * entries before anyone found out it was not a segmentation.
- */
+/** Distinct non-zero values. Stops past `limit`: a continuous-valued volume handed
+ *  in by mistake would otherwise build a set with millions of entries. */
 export function distinctLabels(values: TypedNumberArray, limit = 255): number[] {
   const seen = new Set<number>();
   for (let i = 0; i < values.length; i++) {
@@ -49,13 +38,9 @@ export function distinctLabels(values: TypedNumberArray, limit = 255): number[] 
 }
 
 /**
- * Expand one parsed file into the structures it describes.
- *
- * A file with a single non-zero value is a binary mask named after the file. A
- * file with several is a combined label map, and each value becomes its own
- * structure. Names come from the caller's table when it has one, and otherwise
- * from the value itself, so an unrecognised label map still lists and toggles
- * per structure rather than collapsing into one blob.
+ * One non-zero value is a binary mask named after the file, several is a
+ * combined label map. Names fall back to the value itself, so an unrecognised
+ * label map still toggles per structure rather than collapsing into one blob.
  */
 export function expandMaskFile(
   key: string,
@@ -77,10 +62,9 @@ export interface BuildLabelOptions {
 }
 
 /**
- * Statistics are computed from each mask independently, before packing, so the
- * numbers in the UI describe the actual segmentation rather than whatever
- * survived the overlap resolution. A liver reported as 1573 mL should stay
- * 1573 mL even if a vessel is drawn on top of it.
+ * Stats come from each mask before packing, so the UI numbers describe the
+ * segmentation rather than what survived overlap resolution: a liver reported
+ * at 1573 mL stays 1573 mL even with a vessel drawn on top of it.
  */
 export function buildLabelVolume({ reference, masks }: BuildLabelOptions): LabelVolume {
   const [nx, ny, nz] = reference.dims;
@@ -157,11 +141,9 @@ export function buildLabelVolume({ reference, masks }: BuildLabelOptions): Label
     };
   });
 
-  // Assign label indices in the caller's order so the UI list is stable, then
-  // paint largest first. Smaller structures overwriting larger ones is the
-  // right default: a 29 mL aorta swallowed by a 1573 mL liver would vanish,
-  // while the liver losing a few hundred voxels to the vessel crossing it is
-  // invisible.
+  // Indices follow the caller's order so the UI list is stable, but painting
+  // goes largest first: a 29 mL aorta swallowed by a 1573 mL liver would
+  // vanish, while the liver losing a few hundred voxels to it is invisible.
   stats.forEach((s, i) => { s.structure.index = i + 1; });
   const paintOrder = [...stats].sort((a, b) => b.count - a.count);
 
@@ -171,10 +153,9 @@ export function buildLabelVolume({ reference, masks }: BuildLabelOptions): Label
     const v = s.mask.values;
     const label = s.structure.index;
     const target = s.mask.matchValue;
-    // Paint inside the bounding box only. Structures are small relative to the
-    // scan (the nine here fill 1.5 of 12.4 million voxels), so scanning the
-    // whole array once per structure is most of the work in this function for
-    // none of the result.
+    // Bounding box only. Structures are tiny next to the scan (the nine here
+    // fill 1.5 of 12.4 million voxels), so a full pass per structure would be
+    // most of the work in this function for none of the result.
     const [bi0, bj0, bk0, bi1, bj1, bk1] = s.structure.bounds;
     for (let k = bk0; k <= bk1; k++) {
       const kOff = k * nx * ny;
@@ -203,11 +184,8 @@ export function buildLabelVolume({ reference, masks }: BuildLabelOptions): Label
   };
 }
 
-/**
- * Build the 256x1 RGBA lookup table the shaders index by label value.
- * Alpha carries visibility multiplied by the structure's own opacity, so a
- * hidden structure costs nothing at draw time.
- */
+/** 256x1 RGBA table the shaders index by label value. Alpha is visibility times
+ *  opacity, so a hidden structure costs nothing at draw time. */
 export function buildLut(structures: Structure[], perStructureOpacity = 1): Uint8Array {
   const lut = new Uint8Array(256 * 4);
   for (const s of structures) {

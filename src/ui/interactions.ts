@@ -1,10 +1,8 @@
 /**
- * Pointer, wheel and keyboard handling.
- *
- * Bindings follow 3D Slicer and the PACS workstations people already know:
- * left drag navigates, right drag is window/level, middle drag pans, the wheel
- * scrolls slices. Copying those conventions is worth more than any binding we
- * could invent, because it means a radiologist does not have to learn anything.
+ * Pointer, wheel and keyboard handling. Bindings copy 3D Slicer and the PACS
+ * workstations: left drag navigates, right drag is window and level, middle
+ * drag pans, wheel scrolls slices. Not worth inventing better ones, a
+ * radiologist already knows these.
  */
 
 import type { OrbitCamera } from '../camera/orbit';
@@ -32,10 +30,9 @@ export class Interactions {
   private drag: DragMode = 'none';
   /**
    * Which pane the drag started in, by identity rather than by geometry.
-   * Caching the rect meant a layout change mid-drag (a double click, or a
-   * keyboard shortcut) kept feeding stale coordinates to the pointer maths,
-   * so the crosshair jumped to a position computed against a pane that had
-   * moved.
+   * Caching the rect meant a layout change mid-drag (double click, keyboard
+   * shortcut) fed stale coordinates to the pointer maths and the crosshair
+   * jumped to a position computed against a pane that had moved.
    */
   private dragViewKind: string | null = null;
   private lastX = 0;
@@ -140,8 +137,7 @@ export class Interactions {
       return;
     }
 
-    // Re-resolve the pane every move, so a layout change mid-drag is picked
-    // up instead of the drag continuing against the pane's old rectangle.
+    // Re-resolve the pane each move; see dragViewKind.
     const rect = this.dragViewKind
       ? this.opts.renderer.viewportRects.find((r) => r.view === this.dragViewKind) ?? null
       : null;
@@ -157,9 +153,9 @@ export class Interactions {
       }
 
       case 'window': {
-        // Horizontal widens the window, vertical raises the level. Scaling the
-        // step by the current window means the same drag feels equally fast in
-        // a 150 HU liver window and a 2000 HU bone window.
+        // Horizontal widens, vertical raises the level. Scaling the step by the
+        // current window keeps the same drag equally fast in a 150 HU liver
+        // window and a 2000 HU bone window.
         const scale = Math.max(this.startWindow.window, 50) / 250;
         this.opts.store.set((s) => ({
           windowLevel: {
@@ -264,9 +260,8 @@ export class Interactions {
     const spec = PLANES[rect.view as 'axial' | 'coronal' | 'sagittal'];
 
     if (e.ctrlKey || e.metaKey) {
-      // Zoom about the pointer, so the anatomy under the cursor stays put.
-      // Panning by the drift of that point is what makes zoom feel anchored
-      // rather than always pulling toward the centre.
+      // Zoom about the pointer: pan by however far the point under the cursor
+      // would otherwise drift.
       const t = this.opts.renderer.viewTransformFor(rect, state.views);
       const cur = state.views[rect.view] ?? { zoom: 1, pan: [0, 0] as [number, number] };
       const factor = Math.exp(-e.deltaY * 0.0015);
@@ -298,8 +293,6 @@ export class Interactions {
     const { x, y } = this.local(e);
     const rect = this.viewAt(x, y);
     if (!rect) return;
-    // Double click swaps between the pane under the pointer and four-up, the
-    // fastest way to get a closer look without touching the layout menu.
     const state = this.opts.store.get();
     this.opts.store.set({ layout: state.layout === 'fourUp' ? (rect.view as never) : 'fourUp' });
     this.opts.requestRender();

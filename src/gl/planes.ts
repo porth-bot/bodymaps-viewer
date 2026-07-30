@@ -1,34 +1,27 @@
 /**
- * Plane geometry and the screen <-> voxel mapping.
+ * Plane geometry and the screen <-> voxel mapping. The only place that knows the
+ * display convention; everything downstream just asks for a plane.
  *
- * This module owns the display convention, and it is the only place that knows
- * it. Everything downstream just asks for a plane.
- *
- * Volumes reach here in canonical RAS voxel order (i to the patient's Right,
- * j Anterior, k Superior). Radiological convention then requires:
+ * Volumes arrive in canonical RAS voxel order (i to the patient's Right, j
+ * Anterior, k Superior). Radiological convention falls out of
+ * right = cross(viewDirection, up):
  *
  *   axial     seen from the feet    screen right = patient Left,  up = Anterior
  *   coronal   seen from the front   screen right = patient Left,  up = Superior
  *   sagittal  seen from the left    screen right = Posterior,     up = Superior
- *
- * The derivation for each is right = cross(viewDirection, up), which is what
- * puts the patient's right side on the viewer's left in axial and coronal, and
- * points the face to the left in sagittal.
  */
 
 import type { ViewKind } from '../core/types';
 
 export interface PlaneSpec {
-  /** Volume axis (0=i, 1=j, 2=k) shown along screen x, and whether it runs backwards. */
+  /** Volume axis (0=i, 1=j, 2=k) along screen x, and whether it runs backwards. */
   axisX: 0 | 1 | 2;
   flipX: boolean;
   axisY: 0 | 1 | 2;
   flipY: boolean;
-  /** Volume axis held constant, i.e. the slice normal. */
+  /** Axis held constant: the slice normal. */
   sliceAxis: 0 | 1 | 2;
-  /** Edge labels, clockwise from the left edge. */
   labels: { left: string; right: string; top: string; bottom: string };
-  /** Human name for the slice index readout. */
   sliceName: string;
 }
 
@@ -63,10 +56,8 @@ export interface PlaneTexCoords {
 }
 
 /**
- * Texture-space basis for a slice. The half-voxel offset on the slice axis
- * samples the centre of slice `index` rather than its boundary, which matters
- * because sampling a boundary with linear filtering silently averages two
- * adjacent slices.
+ * Texture-space basis for a slice. The half-voxel offset lands on the centre of
+ * slice `index`: on a boundary, linear filtering silently averages two slices.
  */
 export function planeTexCoords(
   spec: PlaneSpec,
@@ -89,7 +80,7 @@ export function planeTexCoords(
   return { origin, u, v };
 }
 
-/** Physical size of the plane in millimetres, as [width, height] on screen. */
+/** [width, height] in mm, as laid out on screen. */
 export function planeSizeMm(
   spec: PlaneSpec,
   extent: [number, number, number],
@@ -98,12 +89,12 @@ export function planeSizeMm(
 }
 
 export interface ViewTransform {
-  /** Screen pixels per millimetre, including the user's zoom factor. */
+  /** Screen pixels per mm, zoom included. */
   pixelsPerMm: number;
-  /** Drawn quad size in pixels. */
+  /** Pixels. */
   drawnW: number;
   drawnH: number;
-  /** Quad centre offset from the viewport centre, in pixels (x right, y up). */
+  /** Quad centre offset from the viewport centre, in pixels, x right and y up. */
   panPxX: number;
   panPxY: number;
   viewportW: number;
@@ -111,11 +102,10 @@ export interface ViewTransform {
 }
 
 /**
- * Fit the plane into the viewport, then apply zoom and pan.
- *
- * The fit uses millimetres, not voxels. With 0.82 x 0.82 x 2.5 mm voxels the
- * coronal plane is 348 x 71 voxels but 284 x 178 mm, and fitting by voxel
- * count would squash the body to a third of its height.
+ * Fit the plane to the viewport, then zoom and pan. The fit is in millimetres,
+ * not voxels: at 0.82 x 0.82 x 2.5 mm the coronal plane is 348 x 71 voxels but
+ * 284 x 178 mm, so fitting by voxel count squashes the body to a third of its
+ * height.
  */
 export function computeViewTransform(
   spec: PlaneSpec,
@@ -152,9 +142,8 @@ export function clipTransform(t: ViewTransform): { scale: [number, number]; offs
 }
 
 /**
- * Pointer position (relative to the viewport's top-left, y downward) to the
- * quad's [0,1]^2 parameter space. Values outside [0,1] mean the pointer is off
- * the slice, which callers usually want to know about rather than have clamped.
+ * Pointer position (viewport top-left origin, y downward) to the quad's [0,1]^2.
+ * Not clamped: callers want to know when the pointer is off the slice.
  */
 export function screenToPlaneUv(t: ViewTransform, localX: number, localY: number): [number, number] {
   const yFromBottom = t.viewportH - localY;
@@ -171,10 +160,7 @@ export function planeUvToScreen(t: ViewTransform, u: number, v: number): [number
   return [x, t.viewportH - yFromBottom];
 }
 
-/**
- * Full voxel coordinate under the pointer. The slice axis keeps its current
- * index; the in-plane axes come from the quad parameters.
- */
+/** Voxel under the pointer. The slice axis keeps whatever index it is on. */
 export function planeUvToVoxel(
   spec: PlaneSpec,
   dims: [number, number, number],
@@ -201,10 +187,7 @@ export function voxelToPlaneUv(
   return [spec.flipX ? 1 - su : su, spec.flipY ? 1 - sv : sv];
 }
 
-/**
- * The slice quad in volume local millimetres, for drawing the three planes
- * inside the 3D view.
- */
+/** Slice quad in volume local mm, for the three planes drawn in the 3D view. */
 export function planeQuad3D(
   spec: PlaneSpec,
   dims: [number, number, number],
@@ -216,7 +199,7 @@ export function planeQuad3D(
   const p0: [number, number, number] = [0, 0, 0];
   p0[spec.sliceAxis] = (clamped + 0.5) * spacing[spec.sliceAxis];
 
-  // Screen flips are a 2D display convention only. In 3D the quad is just the
+  // No flips here. Those are a 2D display convention; in 3D the quad is just the
   // physical plane, so both edge vectors run along the positive axes.
   const inPlane = ([0, 1, 2] as const).filter((a) => a !== spec.sliceAxis);
   const pu: [number, number, number] = [0, 0, 0];

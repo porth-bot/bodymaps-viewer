@@ -1,9 +1,7 @@
 /**
- * Application state.
- *
- * One plain object, one update function, one subscriber list. A framework
- * would not earn its bytes here: the render path already takes the whole state
- * every frame, so there is nothing for a diffing layer to do.
+ * Application state: one plain object, one update function, one subscriber
+ * list. The render path takes the whole state every frame anyway, so there is
+ * nothing for a diffing layer to do.
  */
 
 import type { LabelVolume, LoadProgress, Structure, Volume, WindowLevel } from '../core/types';
@@ -15,9 +13,8 @@ export type MeshStatus = 'none' | 'queued' | 'building' | 'ready' | 'error';
 
 export interface Measurement {
   id: number;
-  /** Which slice view it was drawn on. */
   view: 'axial' | 'coronal' | 'sagittal';
-  /** Slice index it belongs to, so it only shows on its own slice. */
+  /** Only drawn on this slice. */
   slice: number;
   /** Endpoints in continuous voxel coordinates. */
   a: [number, number, number];
@@ -119,10 +116,9 @@ export function initialState(): AppState {
 
     showMeshes: true,
     meshOpacity: 1,
-    // Off by default, as in 3D Slicer. At the opening camera angle the axial
-    // plane is nearly edge-on, so it contributes almost nothing visually while
-    // occluding a wide band of the volume behind it. Press P or use the 3D
-    // panel to bring the planes back.
+    // Off by default, as in 3D Slicer: at the opening camera angle the axial
+    // plane is nearly edge-on, so it shows almost nothing itself while
+    // occluding a wide band of the volume behind it. P toggles it back.
     showSlicesIn3D: false,
     showBoundingBox: false,
 
@@ -154,9 +150,8 @@ export class Store {
 
   /**
    * Merge a patch and notify. The changed-key set lets expensive subscribers
-   * (rebuilding the structure list, re-uploading the LUT) skip work when an
-   * unrelated field moved, which matters because dragging window/level fires
-   * this on every pointer move.
+   * (structure list, LUT upload) skip work when an unrelated field moved: a
+   * window/level drag fires this on every pointer move.
    */
   set(patch: Partial<AppState> | ((s: Readonly<AppState>) => Partial<AppState>)): void {
     const delta = typeof patch === 'function' ? patch(this.state) : patch;

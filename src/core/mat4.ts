@@ -1,15 +1,9 @@
 /**
- * Minimal 4x4 / 3-vector math.
- *
- * Two storage conventions live in this file and mixing them up is the classic
- * source of silently-wrong rendering, so they are named apart:
- *
- *   Mat4 (Float64Array, ROW-major, m[row*4+col]) is used for anatomical
- *   affines. NIfTI writes its srow_* as rows, so row-major keeps the parser
- *   readable and lets `applyMat4` read like the maths.
- *
- *   GLMat (Float32Array, COLUMN-major) is what WebGL wants for uniforms.
- *   Everything in the `gl` prefix group produces this layout.
+ * Minimal 4x4 / 3-vector math. Two storage conventions live here and mixing
+ * them up is the classic source of silently wrong rendering, so they are named
+ * apart: Mat4 (Float64Array, ROW-major, m[row*4+col]) for anatomical affines,
+ * matching the way NIfTI writes srow_*, and GLMat (Float32Array, COLUMN-major)
+ * for WebGL uniforms, which is what everything in the `gl` group produces.
  */
 
 import type { Mat4 } from './types';
@@ -60,12 +54,10 @@ export function applyMat4Dir(m: Mat4, v: Vec3): Vec3 {
 }
 
 /**
- * General 4x4 inverse by Gauss-Jordan with partial pivoting.
- *
- * A cofactor expansion would be faster, but affines here are inverted a
- * handful of times at load, never per frame, and pivoting means a nearly
- * singular affine from a malformed file throws instead of producing NaNs
- * that only show up as a black screen.
+ * Gauss-Jordan with partial pivoting. A cofactor expansion would be faster,
+ * but affines are inverted a handful of times at load, never per frame, and
+ * pivoting makes a nearly singular affine throw instead of producing NaNs that
+ * only show up as a black screen.
  */
 export function mat4Invert(m: Mat4): Mat4 {
   const a = new Float64Array(32);
@@ -170,8 +162,8 @@ export function glLookAt(eye: Vec3, center: Vec3, up: Vec3): GLMat {
   const f = vnorm(vsub(center, eye));
   let s = vcross(f, up);
   if (vlen(s) < 1e-8) {
-    // Camera is looking straight along `up`; pick any perpendicular so the
-    // view does not collapse when the user orbits through the pole.
+    // Looking straight along `up`. Any perpendicular will do, and without one
+    // the view collapses as the user orbits through the pole.
     s = vcross(f, Math.abs(f[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0]);
   }
   s = vnorm(s);
@@ -201,22 +193,19 @@ export function glInvert(m: GLMat): GLMat {
 }
 
 /**
- * Normal matrix: inverse-transpose of the upper-left 3x3, returned as a GL
- * mat3 (column-major, 9 floats). Needed because non-uniform voxel spacing
- * (0.82 x 0.82 x 2.5 mm here) makes the model matrix anisotropic, and naively
- * reusing it for normals tilts the lighting on every oblique surface.
+ * Inverse-transpose of the upper-left 3x3, as a GL mat3 (column-major, 9
+ * floats). Voxel spacing here is 0.82 x 0.82 x 2.5 mm, so the model matrix is
+ * anisotropic and reusing it for normals tilts lighting on oblique surfaces.
  */
 export function glNormalMatrix(model: GLMat): Float32Array {
   const a = new Float64Array(16);
   for (let i = 0; i < 16; i++) a[i] = model[i];
-  // Reading the column-major input as row-major already transposes it, so the
-  // inverse below is (M^T)^-1 = (M^-1)^T, held in row-major order. Writing
-  // element [r][c] of that into the column-major output means reading
-  // inv[r*4+c], not inv[c*4+r]. Reading it the other way returns M^-1, which
-  // agrees with the right answer only while the upper 3x3 is symmetric. That
-  // covers a pure translation or a uniform scale, so the mistake stays
-  // invisible until someone rotates or non-uniformly scales the model, and
-  // then tilts every normal (77 degrees for a rotated 0.82/2.5 mm grid).
+  // Reading the column-major input as row-major already transposes it, so this
+  // inverse is (M^T)^-1 = (M^-1)^T in row-major order: element [r][c] of it is
+  // inv[r*4+c], not inv[c*4+r]. The other indexing returns M^-1, which agrees
+  // only while the upper 3x3 is symmetric (pure translation, uniform scale), so
+  // the bug hides until something rotates, then tilts every normal, by 77
+  // degrees on a rotated 0.82/2.5 mm grid.
   const inv = mat4Invert(a as unknown as Mat4);
   const out = new Float32Array(9);
   for (let c = 0; c < 3; c++) for (let r = 0; r < 3; r++) out[c * 3 + r] = inv[r * 4 + c];

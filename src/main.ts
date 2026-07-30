@@ -1,7 +1,4 @@
-/**
- * Entry point. Owns the render loop and connects the loader, the store, the
- * renderer and the DOM.
- */
+/** Entry point. Owns the render loop and wires the loader, store, renderer and DOM. */
 
 import './style.css';
 
@@ -40,9 +37,8 @@ function boot(): void {
   const overlay = new Overlay(overlayCanvas);
 
   // --- render loop ------------------------------------------------------
-  // Redraws only when something changed. A viewer that spins the GPU at 60 fps
-  // on a still image is a laptop-battery problem, and the raycaster is the
-  // most expensive thing on the page.
+  // Redraws only when something changed. The raycaster is much too expensive
+  // to spin at 60 fps on a still image.
   let dirty = true;
   const requestRender = () => { dirty = true; };
 
@@ -94,11 +90,10 @@ function boot(): void {
     },
 
     onVolume(volume: Volume, normalized: Float32Array, ms: number) {
-      // The upload is the one step that can fail on the GPU rather than in the
-      // parser, typically a volume larger than the driver's 3D texture limit.
-      // It has to surface as the error it is; letting it escape the worker
-      // callback left the app stuck on the progress overlay with the real
-      // reason only in the console.
+      // The one step that can fail on the GPU rather than in the parser,
+      // usually a volume over the driver's 3D texture limit. Letting it escape
+      // the worker callback left the app stuck on the progress overlay with the
+      // real reason only in the console.
       try {
         renderer.setVolume(volume, normalized);
       } catch (err) {
@@ -117,9 +112,9 @@ function boot(): void {
         Math.floor(volume.dims[2] / 2),
       ];
 
-      // Prefer a standard abdominal window, but fall back to something derived
-      // from the data if the volume is not a CT at all (an MR series, or a
-      // mask opened on its own, would be invisible in a HU window).
+      // Standard abdominal window when it looks like CT, otherwise derive one
+      // from the data: an MR series, or a mask opened on its own, is invisible
+      // in a HU window.
       const looksLikeCt = volume.min < -500 && volume.max > 200;
       const preset = WINDOW_PRESETS.find((p) => p.id === 'soft-tissue');
       const wl = looksLikeCt && preset
@@ -157,9 +152,9 @@ function boot(): void {
         structures,
         meshStatus,
         progress: null,
-        // The mask progress messages flipped status back to 'loading' after
-        // the scan arrived, and nothing set it back, so the app read as
-        // permanently loading once a case finished.
+        // Mask progress messages flipped this back to 'loading' after the scan
+        // arrived and nothing set it back, so a finished case read as
+        // permanently loading.
         status: 'ready',
         timings: { ...store.get().timings, labelsMs: ms },
       });
@@ -278,8 +273,7 @@ function boot(): void {
     saveSnapshot,
   };
 
-  // Debugging handle for the dev server only. Vite drops the whole branch from
-  // the production bundle, so nothing is exposed on the deployed page.
+  // Dev server only. Vite drops the whole branch from the production bundle.
   if (import.meta.env.DEV) {
     (window as unknown as Record<string, unknown>).__viewer = {
       store, camera, renderer, captureFrame, requestRender,
@@ -300,9 +294,9 @@ function boot(): void {
 
   $('splash-load').addEventListener('click', () => deps.loadSample());
 
-  // Keep the GPU-side lookup table and the per-surface colours in step with
-  // the structure list. Doing it from a subscription rather than at every call
-  // site means a visibility toggle can never update the list but not the view.
+  // LUT and per-surface colours follow the structure list from here rather
+  // than from each call site, so a visibility toggle cannot update the list
+  // and miss the view.
   store.subscribe((state, changed) => {
     if (changed.has('structures')) {
       renderer.setLut(buildLut(state.structures));
@@ -329,8 +323,6 @@ function boot(): void {
   requestAnimationFrame(frame);
 
   // Auto-load the sample so a reviewer sees anatomy without clicking anything.
-  // A demo that opens on an empty grey box asks the visitor to trust that the
-  // rest works.
   deps.loadSample();
 }
 
@@ -433,10 +425,7 @@ function showFatal(message: string): void {
   }
 }
 
-/**
- * Flatten the GL canvas and the annotation overlay into one image, at full
- * device resolution so the export is not a blurry copy of the screen.
- */
+/** Flatten the GL canvas and the overlay into one image at full device resolution. */
 function compositeCanvases(gl: HTMLCanvasElement, overlay: HTMLCanvasElement): string {
   const out = document.createElement('canvas');
   out.width = gl.width;
@@ -452,11 +441,7 @@ function describeLayout(state: AppState): string {
   return state.layout === 'fourUp' ? '4up' : state.layout;
 }
 
-/**
- * Drag and drop over the whole window, not just the viewport. Dropping onto a
- * 4-pane grid is fiddly, and a folder dropped anywhere clearly means "open
- * this".
- */
+/** Drop anywhere on the window, not just the viewport. Aiming at one pane is fiddly. */
 function setupDragAndDrop(deps: PanelDeps): void {
   const overlay = document.getElementById('drop-overlay');
   let depth = 0;
@@ -490,8 +475,8 @@ function setupDragAndDrop(deps: PanelDeps): void {
 
 /**
  * Walk dropped directory entries so a whole case folder works, not just a
- * multi-select of files. These datasets ship as a folder with the scan at the
- * top and the masks in a subdirectory, which is exactly what people will drag.
+ * multi-select. These datasets ship as a folder with the scan at the top and
+ * the masks in a subdirectory, which is what people will drag.
  */
 async function collectFiles(dt: DataTransfer): Promise<File[]> {
   const entries: FileSystemEntry[] = [];
@@ -517,9 +502,9 @@ async function collectFiles(dt: DataTransfer): Promise<File[]> {
     }
     if (entry.isDirectory) {
       const reader = (entry as FileSystemDirectoryEntry).createReader();
-      // readEntries returns at most 100 at a time and must be called until it
-      // returns an empty batch, which is easy to miss and silently truncates
-      // any folder with more structures than that.
+      // readEntries hands back at most 100 entries per call and has to be
+      // called until it returns an empty batch, or a folder with more
+      // structures than that is silently truncated.
       for (;;) {
         const batch = await new Promise<FileSystemEntry[]>((resolve) =>
           reader.readEntries((r) => resolve(r), () => resolve([])),

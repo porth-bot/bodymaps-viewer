@@ -1,19 +1,14 @@
-/**
- * Volume utilities: GPU normalisation, sampling, and voxel/world conversion.
- */
+/** Volume utilities: GPU normalisation, sampling, and voxel/world conversion. */
 
 import { applyMat4, mat4Invert, type Vec3 } from './mat4';
 import type { AxCodes, LabelVolume, Volume } from './types';
 
 /**
- * Map raw voxels to [0,1] over the volume's real-unit range, for upload as a
- * half-float texture.
- *
- * The shader undoes this with u_huMin/u_huRange so window/level is always
- * applied in true Hounsfield units. Normalising rather than uploading HU
- * directly keeps the values inside half-float's precise range: HU near 1000
- * quantises to about 0.5 HU steps as a half float, but [0,1] values are
- * uniformly precise to about 0.0005, which is 1 HU over a 2000 HU span.
+ * Raw voxels to [0,1] over the volume's real-unit range, for upload as a
+ * half-float texture; the shader undoes it with u_huMin/u_huRange so
+ * window/level still happens in true Hounsfield units. Uploading HU directly
+ * would quantise: near 1000 HU a half float steps by about 0.5 HU, where [0,1]
+ * is uniformly good to about 0.0005, or 1 HU over a 2000 HU span.
  */
 export function normalizeForGpu(volume: Volume): Float32Array {
   const { values, slope, intercept, min, max } = volume;
@@ -21,8 +16,7 @@ export function normalizeForGpu(volume: Volume): Float32Array {
   const range = max - min;
   if (range <= 0) return out;
   const invRange = 1 / range;
-  // Fold the rescale into the normalisation so this is one multiply-add per
-  // voxel rather than two passes over 12 million elements.
+  // Rescale folded in: one multiply-add per voxel, not two passes over 12 million.
   const a = slope * invRange;
   const b = (intercept - min) * invRange;
   for (let i = 0; i < values.length; i++) out[i] = values[i] * a + b;
@@ -75,9 +69,8 @@ export function clampVoxel(volume: Volume, voxel: Vec3): Vec3 {
 }
 
 /**
- * Anatomical position label for the readout, e.g. "R 42.1  A 13.7  S 88.0".
- * Reports the direction letter rather than a signed axis name because "L 20"
- * is unambiguous where "x = -20" depends on knowing the convention.
+ * Position readout, e.g. "R 42.1  A 13.7  S 88.0". Direction letters rather
+ * than signed axes: "L 20" is unambiguous where "x = -20" needs the convention.
  */
 export function formatPatientPosition(world: Vec3): string {
   const axis = (v: number, pos: string, neg: string) =>
@@ -90,9 +83,8 @@ export function describeAxCodes(codes: AxCodes): string {
 }
 
 /**
- * Histogram of the rescaled values, for the window/level widget.
- * Air dominates any CT by a wide margin, so callers usually plot this on a log
- * scale; returning raw counts keeps that decision out of here.
+ * Histogram of the rescaled values, for the window/level widget. Air dominates
+ * any CT by a wide margin, so callers plot this on a log scale.
  */
 export function histogram(volume: Volume, bins = 256): { counts: Uint32Array; min: number; max: number } {
   const counts = new Uint32Array(bins);
@@ -100,8 +92,7 @@ export function histogram(volume: Volume, bins = 256): { counts: Uint32Array; mi
   const range = max - min;
   if (range <= 0) return { counts, min, max };
   const scale = (bins - 1) / range;
-  // Stride large volumes: 12 million samples and 1 million samples produce the
-  // same histogram shape, and the widget only needs the shape.
+  // 12 million samples and 1 million give the same shape, and shape is all the widget wants.
   const stride = Math.max(1, Math.floor(values.length / 2_000_000));
   for (let i = 0; i < values.length; i += stride) {
     const v = values[i] * slope + intercept;

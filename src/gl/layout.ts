@@ -1,11 +1,8 @@
 /**
- * Viewport layout.
- *
- * All four views share a single WebGL2 canvas and are separated with
- * gl.viewport/gl.scissor. One canvas means one context, which means the 25 MB
- * volume texture is uploaded once instead of once per view. Four contexts
- * would need four copies and would hit the browser's context limit as soon as
- * anything else on the page wanted one.
+ * Viewport layout. All four views share one WebGL2 canvas, split with
+ * gl.viewport/gl.scissor. Separate canvases would mean four contexts, so four
+ * copies of the 25 MB volume texture and trouble with the browser's context
+ * limit.
  */
 
 import type { ViewKind } from '../core/types';
@@ -33,7 +30,7 @@ export const LAYOUT_LABELS: Record<LayoutMode, string> = {
   row: 'Three slices',
 };
 
-/** Gap between panes, in CSS pixels. */
+/** CSS pixels. */
 const GAP = 2;
 
 export function computeLayout(mode: LayoutMode, width: number, height: number): ViewportRect[] {

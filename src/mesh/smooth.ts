@@ -1,30 +1,26 @@
 /**
  * Taubin lambda/mu mesh smoothing.
  *
- * Plain Laplacian smoothing is a low-pass filter with transfer function
- * (1 - lambda*k) over the mesh Laplacian eigenvalues k in [0,2]. It attenuates
- * every non-zero frequency, so a closed surface shrinks a little on every
- * iteration and a smoothed organ ends up visibly smaller than its mask. Taubin
- * alternates the shrinking step with a negative one (mu < 0, |mu| > lambda),
- * giving (1 - lambda*k)(1 - mu*k). That product is > 1 for low k and < 1 for
- * high k, so noise still dies while the overall shape holds its size. The
- * crossover sits at the passband frequency kPB = 1/lambda + 1/mu, which the
- * defaults keep near zero.
+ * Plain Laplacian smoothing attenuates every non-zero frequency, so a closed
+ * surface shrinks a little on every iteration and a smoothed organ ends up
+ * visibly smaller than its mask. Taubin alternates the shrinking step with a
+ * negative one (mu < 0, |mu| > lambda), giving a gain above 1 at low frequencies
+ * and below 1 at high ones: noise still dies, the overall shape holds its size.
+ * The crossover sits at 1/lambda + 1/mu, which is where the defaults come from:
+ * they put it at 0.11, so everything but the lowest frequencies is attenuated.
  */
 
 /**
- * Smooth `positions` in place-free fashion: the input is never modified.
+ * Smooth `positions`. The input is never modified.
  *
  * `iterations` counts individual steps, not lambda/mu pairs, and they alternate
  * starting with lambda. Pass an even number so the sequence ends on a mu step,
  * otherwise the last shrink is left uncompensated.
  *
- * Adjacency is built once as CSR (count, prefix sum, fill) and reused, since
- * rebuilding it inside the loop would dominate the cost of the whole routine.
- * Neighbours come from the directed triangle edges: on a closed, consistently
+ * Neighbours come from the directed triangle edges. On a closed, consistently
  * oriented mesh each triangle around a vertex contributes exactly one outgoing
  * edge, so every neighbour appears exactly once and the uniform weights are
- * genuinely uniform without a deduplication pass.
+ * genuinely uniform with no deduplication pass.
  */
 export function taubinSmooth(
   positions: Float32Array,
@@ -51,8 +47,8 @@ export function taubinSmooth(
       const p = v * 3;
       const degree = end - start;
       if (degree === 0) {
-        // Isolated vertex (only reachable if the caller passed a mesh with
-        // unreferenced positions). Leave it where it is.
+        // Isolated vertex, only reachable if the caller passed a mesh with
+        // unreferenced positions. Leave it where it is.
         next[p] = cur[p];
         next[p + 1] = cur[p + 1];
         next[p + 2] = cur[p + 2];
@@ -85,19 +81,16 @@ interface Adjacency {
   adjacency: Int32Array;
 }
 
+/** CSR adjacency, built once: rebuilding it per iteration dominated everything else. */
 function buildAdjacency(indices: Uint32Array, vertexCount: number): Adjacency {
   const offsets = new Int32Array(vertexCount + 1);
 
-  // Counting pass. Each triangle (a,b,c) contributes the directed edges
-  // a->b, b->c, c->a, so every vertex gains one neighbour per incident
-  // triangle.
   for (let t = 0; t < indices.length; t += 3) {
     offsets[indices[t]]++;
     offsets[indices[t + 1]]++;
     offsets[indices[t + 2]]++;
   }
 
-  // Exclusive prefix sum, turning per-vertex counts into row starts.
   let total = 0;
   for (let v = 0; v <= vertexCount; v++) {
     const c = offsets[v];

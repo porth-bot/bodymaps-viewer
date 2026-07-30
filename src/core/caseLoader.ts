@@ -1,11 +1,8 @@
 /**
- * Main-thread side of loading: drives the loader worker and a small pool of
- * mesh workers.
- *
- * The pool size is capped at three. Surface extraction is memory bound rather
- * than compute bound (each worker holds its own 12 MB copy of the label
- * volume), so spawning one per core buys little and costs a lot of RAM on a
- * 16-core machine.
+ * Main-thread side of loading: drives the loader worker and a small mesh
+ * worker pool. The pool is capped at three because surface extraction is
+ * memory bound, not compute bound (each worker holds its own 12 MB copy of the
+ * label volume), so one per core buys little and costs a lot of RAM.
  */
 
 import type { LabelVolume, Mesh, Structure, Volume } from './types';
@@ -53,8 +50,7 @@ export class CaseLoader {
 
     this.loader.onmessage = (event: MessageEvent<LoaderMessage>) => {
       const msg = event.data;
-      // A case switched mid-load leaves stale messages in the queue; dropping
-      // them by token avoids the old scan overwriting the new one.
+      // Stale messages from a case switched mid-load would overwrite the new scan.
       if (msg.token !== this.token) return;
 
       switch (msg.type) {
@@ -81,11 +77,7 @@ export class CaseLoader {
     this.loader.postMessage(request);
   }
 
-  /**
-   * Start building surfaces for every structure. The label volume is cloned
-   * once into each worker, then structures are handed out largest-first so the
-   * slowest jobs start earliest and the pool drains evenly.
-   */
+  /** Structures go out largest first, so the slowest jobs start earliest and the pool drains evenly. */
   buildMeshes(labels: LabelVolume, structures: Structure[]): void {
     this.stopMeshWorkers();
     const nonEmpty = structures.filter((s) => s.voxelCount > 0);
@@ -111,9 +103,8 @@ export class CaseLoader {
         type: 'init',
         dims: labels.dims,
         spacing: labels.spacing,
-        // Each worker needs its own copy. SharedArrayBuffer would avoid this
-        // but requires cross-origin isolation headers, which a static host
-        // like GitHub Pages cannot set.
+        // Each worker needs its own copy: SharedArrayBuffer would avoid it but
+        // needs cross-origin isolation headers, which GitHub Pages cannot set.
         values: labels.values.slice(),
       };
       worker.postMessage(init, [init.values.buffer]);
@@ -199,12 +190,9 @@ export function sampleCase(base: string): CaseSources {
 }
 
 /**
- * Turn a user's dropped files into case sources.
- *
- * The heuristic mirrors how these datasets are actually laid out: one file
- * whose name looks like the scan, and everything else treated as a structure
- * named after its file. Anything under a "segmentations" or "masks" folder is
- * a structure regardless of its name.
+ * Mirrors how these datasets are actually laid out: one file whose name looks
+ * like the scan, everything else a structure named after its file. Anything
+ * under a "segmentations" or "masks" folder is a structure whatever its name.
  */
 export function sourcesFromFiles(files: File[]): CaseSources | null {
   const nifti = files.filter((f) => /\.nii(\.gz)?$/i.test(f.name));
@@ -216,7 +204,7 @@ export function sourcesFromFiles(files: File[]): CaseSources | null {
 
   let ctFile = nifti.find((f) => looksLikeScan(f) && !isSegPath(f));
   if (!ctFile) ctFile = nifti.find((f) => !isSegPath(f));
-  // Last resort: the largest file. A scan is int16 and a mask is int8 over the
+  // Last resort, the largest file: a scan is int16 and a mask int8 over the
   // same grid, so the scan compresses far worse and is reliably biggest.
   if (!ctFile) ctFile = nifti.reduce((a, b) => (a.size >= b.size ? a : b));
 

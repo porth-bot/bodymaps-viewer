@@ -1,32 +1,23 @@
 /**
  * Separable box blur for scalar fields on a regular voxel grid.
  *
- * Why an organ mask gets blurred before isosurfacing: a 0/1 field has every
- * sign change landing at exactly 0.5 between two voxels, so the extracted
- * surface can only ever sit on the voxel mid-planes. The result is a staircase
- * that no amount of post-hoc smoothing fully removes, because the smoothing has
- * no idea which way the true boundary ran. Blurring first replaces the hard
- * mask with a smooth occupancy field, so the 0.5 crossing interpolates to a
- * sub-voxel position and the surface follows the real organ boundary. Three
- * successive box passes converge on a Gaussian (central limit theorem), which
- * is why the blur is built from cheap radius-1 boxes rather than an explicit
- * Gaussian kernel.
+ * The mask is blurred before it is thresholded because a 0/1 field puts every
+ * sign change exactly halfway between two voxels, so the isosurface can only
+ * land on the voxel mid-planes. No later smoothing undoes that staircase, since
+ * by then nothing knows which way the true boundary ran; blurred first, the 0.5
+ * crossing interpolates to a sub-voxel position.
  */
 
 /**
- * Blur `field` without modifying it.
+ * Blur `field` without modifying it. A pass is an x, then y, then z sweep with a
+ * radius-1 box, so `passes` passes reach `passes` voxels. Repeated boxes
+ * converge on a Gaussian, which is why there is no explicit Gaussian kernel.
  *
- * One "pass" is a full x, then y, then z sweep with a radius-1 box (the
- * [1,1,1]/3 kernel), border-clamped. So `passes` passes have an effective
- * support radius of `passes` voxels, and a caller who needs the blurred field to
- * stay below the 0.5 isovalue at the array border (which is what makes the
- * extracted isosurface closed) has to pad its crop by at least that much. Two
- * voxels of padding, the old fixed figure, silently stops being enough somewhere
- * past ten passes: border clamping reflects a solid region back into the border,
- * so the value there climbs toward 0.5 rather than decaying to zero.
- *
- * Allocation is exactly two scratch volumes regardless of `passes`: the sweeps
- * ping-pong between them and no per-row temporary is ever created.
+ * Border-clamped, so a caller that needs the blurred field below 0.5 at the
+ * array border (which is what makes the extracted isosurface closed) has to pad
+ * its crop by at least that much. Two voxels, the old fixed figure, silently
+ * stops being enough past ten passes: clamping reflects a solid region back into
+ * the border, so the value there climbs toward 0.5 rather than decaying to zero.
  */
 export function boxBlur3(
   field: Float32Array,
@@ -43,8 +34,6 @@ export function boxBlur3(
   const bufA = new Float32Array(n);
   const bufB = new Float32Array(n);
 
-  // The first sweep reads the caller's array; every later sweep alternates
-  // between the two scratch buffers.
   let src: Float32Array = field;
   let dst: Float32Array = bufA;
   const advance = (): void => {
@@ -64,7 +53,6 @@ export function boxBlur3(
   return src;
 }
 
-/** Contiguous axis: each row of `width` samples is a straight 3-tap scan. */
 function blurX(src: Float32Array, dst: Float32Array, width: number, rows: number): void {
   const third = 1 / 3;
   if (width === 1) {
@@ -85,14 +73,12 @@ function blurX(src: Float32Array, dst: Float32Array, width: number, rows: number
 }
 
 /**
- * Non-contiguous axis, blurred a whole plane at a time.
- *
- * `stride` is the sample distance along the blurred axis and doubles as the
- * width of the contiguous run to process per step: for y that is nx (one row),
- * for z it is nx*ny (one slice). `count` is the number of steps along the axis
- * and `outer` the number of independent blocks above it (nz for y, 1 for z).
- * Sweeping whole contiguous runs keeps this bandwidth bound instead of walking
- * one column at a time and missing the cache on every sample.
+ * Non-contiguous axis, blurred a whole plane at a time. `stride` is the sample
+ * distance along the blurred axis and doubles as the width of the contiguous run
+ * to process per step: nx (a row) for y, nx*ny (a slice) for z. `count` is the
+ * number of steps along the axis, `outer` the independent blocks above it (nz
+ * for y, 1 for z). Sweeping whole runs rather than one column at a time is the
+ * difference between bandwidth bound and a cache miss per sample.
  */
 function blurStrided(
   src: Float32Array,

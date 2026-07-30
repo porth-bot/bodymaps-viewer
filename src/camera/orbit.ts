@@ -1,11 +1,9 @@
 /**
- * Orbit camera for the 3D view, in volume local millimetre space.
+ * Orbit camera for the 3D view, in volume local millimetres.
  *
- * Azimuth is measured so that 0 puts the camera anterior to the patient
- * looking posteriorly, which is the view a clinician expects to open on.
- * Up is fixed to +S (superior) rather than being free, because a 3D anatomy
- * view that can roll is disorienting: you lose the instant read of which way
- * is up in the body.
+ * Azimuth 0 puts the camera anterior to the patient looking posteriorly, the
+ * view a clinician expects to open on. Up is fixed to +S (superior) rather
+ * than free: a body view that can roll loses the read of which way is up.
  */
 
 import {
@@ -41,7 +39,6 @@ export class OrbitCamera {
     this.distance = this.radius / Math.sin(this.fovY / 2) * 0.85;
   }
 
-  /** Snap to a standard anatomical viewpoint. */
   setStandardView(view: 'anterior' | 'posterior' | 'left' | 'right' | 'superior' | 'inferior'): void {
     const table: Record<string, [number, number]> = {
       anterior: [0, 0],
@@ -62,15 +59,12 @@ export class OrbitCamera {
   }
 
   dolly(factor: number): void {
-    // Clamped so the wheel can neither push the camera through the target nor
-    // send the volume off to a vanishing point.
+    // Clamped so the wheel cannot push through the target or lose the volume
+    // off at a vanishing point.
     this.distance = Math.max(this.radius * 0.15, Math.min(this.radius * 20, this.distance * factor));
   }
 
-  /**
-   * Pan in screen space. The distance scaling keeps the anatomy glued to the
-   * pointer at any zoom level, which is what makes dragging feel direct.
-   */
+  /** Pan in screen space. The distance scaling keeps anatomy under the pointer at any zoom. */
   pan(dxPixels: number, dyPixels: number, viewportHeight: number): void {
     const worldPerPixel = (2 * this.distance * Math.tan(this.fovY / 2)) / Math.max(viewportHeight, 1);
     const eye = this.position();
@@ -106,12 +100,5 @@ export class OrbitCamera {
 
   viewProjection(aspect: number): GLMat {
     return glMultiply(this.projection(aspect), this.view());
-  }
-
-  nearFar(): [number, number] {
-    return [
-      Math.max(this.distance - this.radius * 3, this.radius * 0.01),
-      this.distance + this.radius * 6,
-    ];
   }
 }

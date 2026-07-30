@@ -1,7 +1,6 @@
 /**
- * Thin WebGL2 helpers. Deliberately not an abstraction layer: the renderer
- * still writes plain GL calls, this just removes the boilerplate and turns
- * driver failures into errors that say what actually went wrong.
+ * Thin WebGL2 helpers, not an abstraction layer: the renderer still writes plain
+ * GL calls. This only kills boilerplate and makes driver failures legible.
  */
 
 export class GLError extends Error {}
@@ -32,8 +31,7 @@ function compile(gl: WebGL2RenderingContext, type: number, source: string, name:
   gl.compileShader(sh);
   if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
     const log = gl.getShaderInfoLog(sh) ?? '(no log)';
-    // Prefix every line so the driver's "ERROR: 0:57" maps to something we can
-    // find without counting lines by hand.
+    // Number the source so the driver's "ERROR: 0:57" points at a line.
     const numbered = source
       .split('\n')
       .map((l, i) => `${String(i + 1).padStart(4)} | ${l}`)
@@ -71,8 +69,7 @@ export function createProgram(
     throw new GLError(`Failed to link ${name}: ${log}`);
   }
 
-  // Reflect the active uniforms and attributes rather than requiring callers to
-  // list them, so adding a uniform to a shader never needs a matching edit here.
+  // Reflected, so adding a uniform to a shader needs no matching edit here.
   const uniforms: Record<string, WebGLUniformLocation | null> = {};
   const nUniforms = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS) as number;
   for (let i = 0; i < nUniforms; i++) {
@@ -93,12 +90,10 @@ export function createProgram(
 }
 
 /**
- * Upload a scalar 3D texture.
- *
- * Half float is the sweet spot for CT: an 8-bit texture quantises a 2000 HU
- * range into 7.8 HU steps, which visibly bands a narrow liver window, while
- * full float doubles the GPU memory for precision nothing can see. R16F is
- * filterable in core WebGL2, so trilinear sampling in the raycaster is free.
+ * Scalar 3D texture. R16F, not R8: 8 bits quantises a 2000 HU range into 7.8 HU
+ * steps, which visibly bands a narrow liver window. Full float doubles the GPU
+ * memory for precision nothing can see, and R16F is filterable in core WebGL2,
+ * so the raycaster gets trilinear sampling for free.
  */
 export function createVolumeTexture(
   gl: WebGL2RenderingContext,
@@ -131,9 +126,8 @@ export function createVolumeTexture(
 }
 
 /**
- * Label volumes go up as R8UI. Integer textures cannot be filtered, which is
- * exactly right: interpolating between label 3 and label 7 would invent label 5
- * along every organ boundary.
+ * R8UI. Integer textures cannot be filtered, which is the point: interpolating
+ * label 3 and label 7 would invent label 5 along every organ boundary.
  */
 export function createLabelTexture(
   gl: WebGL2RenderingContext,
@@ -163,9 +157,8 @@ export function createLabelTexture(
 }
 
 /**
- * 256x1 RGBA lookup table indexed by label value. Toggling a structure's
- * visibility or opacity rewrites 1 KB instead of touching the 12 MB label
- * volume, which is what keeps the structure list instant.
+ * 256x1 RGBA table indexed by label value. Toggling a structure's visibility or
+ * opacity rewrites 1 KB instead of touching the 12 MB label volume.
  */
 export function createLutTexture(gl: WebGL2RenderingContext): WebGLTexture {
   const tex = gl.createTexture();
@@ -189,12 +182,10 @@ export function updateLutTexture(gl: WebGL2RenderingContext, tex: WebGLTexture, 
 }
 
 /**
- * Offscreen colour + depth target for the 3D view.
- *
- * The depth attachment is a TEXTURE, not a renderbuffer, because the volume
- * raycaster samples it to stop each ray at whichever organ surface it hits.
- * That is what makes surfaces and volume rendering occlude each other
- * correctly instead of one always drawing on top.
+ * Offscreen colour and depth for the 3D view. Depth is a texture, not a
+ * renderbuffer, because the raycaster samples it to stop each ray at whichever
+ * organ surface it hits. Without that, surfaces and volume cannot occlude each
+ * other and one of them always wins.
  */
 export interface RenderTarget {
   fbo: WebGLFramebuffer;
@@ -214,9 +205,8 @@ export function createRenderTarget(gl: WebGL2RenderingContext, width: number, he
 
   gl.bindTexture(gl.TEXTURE_2D, color);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-  // Linear on colour so the supersampled path actually resolves. Rendering the
-  // 3D pass at 1.5x and then point-sampling it back down just throws away the
-  // extra samples, which is the whole reason for rendering large.
+  // Linear on colour: the 3D pass renders at 1.5x, and point-sampling it back
+  // down would throw away exactly the samples we paid for.
   for (const p of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, p, gl.LINEAR);
   for (const p of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, p, gl.CLAMP_TO_EDGE);
 
@@ -252,7 +242,7 @@ export function resizeRenderTarget(
   return createRenderTarget(gl, w, h);
 }
 
-/** A unit quad in [0,1]^2 as a triangle strip, used by every screen-space pass. */
+/** Unit quad in [0,1]^2 as a triangle strip. Every screen-space pass uses it. */
 export function createQuad(gl: WebGL2RenderingContext): WebGLVertexArrayObject {
   const vao = gl.createVertexArray();
   const buf = gl.createBuffer();

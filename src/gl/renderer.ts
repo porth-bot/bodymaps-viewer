@@ -1,11 +1,7 @@
 /**
- * The renderer. Owns the GL context, every texture and program, and draws all
- * four viewports of a frame.
- *
- * It is deliberately stateless with respect to the UI: `render()` takes the
- * whole scene description each frame. That makes the draw path trivially
- * reproducible from a saved state and removes a whole class of bugs where a
- * toggle updates the UI but not the GPU.
+ * Owns the GL context, every texture and program, and draws all four viewports.
+ * render() takes the whole scene each frame instead of holding UI state, so a
+ * toggle can never update the UI and miss the GPU.
  */
 
 import type { LabelVolume, Mesh, Volume, WindowLevel } from '../core/types';
@@ -30,13 +26,13 @@ export type VolumeRenderMode = 'composite' | 'mip';
 
 export interface ViewSettings {
   zoom: number;
-  /** Pan in millimetres along the view's screen x and y. */
+  /** Millimetres along the view's screen x and y. */
   pan: [number, number];
 }
 
 export interface RenderState {
   layout: LayoutMode;
-  /** Continuous voxel coordinates of the crosshair, in RAS voxel order. */
+  /** Continuous voxel coordinates, RAS order. Not rounded to a slice. */
   crosshair: [number, number, number];
   windowLevel: WindowLevel;
 
@@ -51,7 +47,7 @@ export interface RenderState {
   volumeMode: VolumeRenderMode;
   volumeDensity: number;
   volumeShade: boolean;
-  /** 0.25 (fast) to 2.0 (fine). Multiplies samples per voxel. */
+  /** 0.25 (fast) to 2.0 (fine), as a multiplier on samples per voxel. */
   volumeQuality: number;
   volumeLabelBoost: number;
 
@@ -61,7 +57,7 @@ export interface RenderState {
   showBoundingBox: boolean;
 
   camera: OrbitCamera;
-  /** Highlighted pane border. */
+  /** Drawn by the overlay as a highlighted pane border. */
   activeView: string | null;
 }
 
@@ -71,7 +67,7 @@ interface GpuMesh {
   normals: WebGLBuffer;
   indices: WebGLBuffer;
   count: number;
-  /** Centroid in local mm, for back-to-front sorting of translucent surfaces. */
+  /** Local mm, for back-to-front sorting. */
   centroid: Vec3;
 }
 
@@ -108,7 +104,6 @@ export class Renderer {
   private meshColors = new Map<number, [number, number, number]>();
   private meshVisible = new Map<number, boolean>();
 
-  /** Device pixels per CSS pixel, refreshed on resize. */
   private dpr = 1;
   private lastRects: ViewportRect[] = [];
   private superSample = 1;
@@ -150,18 +145,15 @@ export class Renderer {
   }
 
   /**
-   * Upload a volume. `normalized` carries the same voxels mapped to [0,1] over
-   * [min,max]; it is produced in the loader worker so the main thread never
-   * walks 12 million voxels during an interaction.
+   * `normalized` is the same voxels mapped to [0,1] over [min,max], built in the
+   * loader worker so the main thread never walks 12 million voxels.
    */
   setVolume(volume: Volume, normalized: Float32Array): void {
     const gl = this.gl;
-    // Upload before discarding anything. A volume past the driver's 3D texture
-    // limit throws here, and releasing the old texture first would leave the
-    // renderer holding a deleted handle with the new dimensions, so every
-    // later frame drew a black pane that no reload could recover. Failing this
-    // way costs one frame of double texture residency and keeps the previous
-    // case on screen behind the error banner.
+    // Upload before deleting the old texture. A volume past the driver's 3D
+    // texture limit throws here, and releasing first left the renderer holding
+    // a deleted handle with the new dims: every frame after that drew a black
+    // pane no reload could clear. Costs one frame of double residency.
     const tex = createVolumeTexture(gl, volume.dims, normalized);
     if (this.volumeTex) gl.deleteTexture(this.volumeTex);
     this.volumeTex = tex;
@@ -253,7 +245,7 @@ export class Renderer {
     return this.meshes.size;
   }
 
-  /** Sync the drawing buffer to the element size. Returns true if it changed. */
+  /** True if the drawing buffer size changed. */
   resize(): boolean {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const cssW = this.canvas.clientWidth;
@@ -268,14 +260,10 @@ export class Renderer {
   }
 
   /**
-   * Average CPU time spent building a frame, in milliseconds.
-   *
-   * This is submit time, not GPU time. GL calls return as soon as the command
-   * is queued, so this measures how long the main thread is busy, which is
-   * what determines whether the UI stays responsive. It is not the frame rate
-   * and must not be reported as one: on a fast GPU it undercounts, and on a
-   * slow one the driver blocks and it overcounts. Real GPU timing needs
-   * EXT_disjoint_timer_query_webgl2, which is unavailable in most browsers.
+   * Mean milliseconds spent submitting a frame. Submit time, not GPU time: GL
+   * calls return once queued, so this is main-thread busyness, not a frame rate,
+   * and must not be labelled as one. Real GPU timing would need
+   * EXT_disjoint_timer_query_webgl2, which most browsers do not expose.
    */
   get cpuFrameMs(): number {
     if (this.frameTimes.length === 0) return 0;
@@ -315,7 +303,7 @@ export class Renderer {
     if (this.frameTimes.length > 30) this.frameTimes.shift();
   }
 
-  /** Device-pixel GL viewport for a CSS-pixel rect, flipping to GL's bottom-left origin. */
+  /** CSS-pixel rect to device-pixel GL viewport, flipped to GL's bottom-left origin. */
   private glViewport(rect: ViewportRect): [number, number, number, number] {
     const d = this.dpr;
     const x = Math.round(rect.x * d);
@@ -326,10 +314,8 @@ export class Renderer {
   }
 
   /**
-   * The fit/zoom/pan transform for a slice pane. The overlay and the pointer
-   * handling both need this, and both must agree with what was drawn, so it
-   * is derived here from the same inputs the draw call uses rather than
-   * recomputed independently.
+   * Fit/zoom/pan for a slice pane. The overlay and the pointer code both need it
+   * and both must agree with what was actually drawn, so neither recomputes it.
    */
   viewTransformFor(rect: ViewportRect, views: Record<string, ViewSettings>): ViewTransform | null {
     if (rect.view === 'volume') return null;
@@ -408,10 +394,9 @@ export class Renderer {
     const [vx, vy, vw, vh] = this.glViewport(rect);
     if (vw <= 0 || vh <= 0) return;
 
-    // Supersample the offscreen pass a little when quality is high. The final
-    // bilinear read then acts as a cheap antialias for the mesh silhouettes,
-    // which the default framebuffer's MSAA cannot do for us because the
-    // raycast composites over an offscreen target.
+    // Supersample the offscreen pass when quality is high: the bilinear read
+    // back is a cheap antialias on mesh silhouettes, which the default
+    // framebuffer's MSAA cannot give us once the raycast composites over an FBO.
     this.superSample = state.volumeQuality >= 1.5 ? 1.5 : 1;
     const fw = Math.round(vw * this.superSample);
     const fh = Math.round(vh * this.superSample);
@@ -470,8 +455,6 @@ export class Renderer {
       gl.uniform1f(prog.uniforms['u_density'] ?? null, state.volumeDensity);
       gl.uniform1i(prog.uniforms['u_shade'] ?? null, state.volumeShade ? 1 : 0);
       gl.uniform1f(prog.uniforms['u_labelBoost'] ?? null, state.showLabels ? state.volumeLabelBoost : 0);
-      const [near, far] = state.camera.nearFar();
-      gl.uniform2f(prog.uniforms['u_near_far'] ?? null, near, far);
 
       gl.bindVertexArray(this.quad);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -487,12 +470,10 @@ export class Renderer {
       gl.bindVertexArray(null);
     }
 
-    // Release the offscreen attachments from their sampler units. Leaving them
-    // bound means the next frame binds the same framebuffer for drawing while
-    // its own colour and depth textures are still attached to samplers, which
-    // is a feedback loop the spec leaves undefined. Nothing in the mesh or
-    // plane programs reads those units, so it is currently harmless, but it is
-    // one added texture fetch away from being a driver-specific bug.
+    // Unbind the offscreen attachments. Next frame draws into the same FBO, and
+    // leaving its colour and depth on sampler units is a feedback loop the spec
+    // leaves undefined. Harmless while nothing samples units 3 and 4, one added
+    // texture fetch away from a driver-specific bug.
     for (const unit of [gl.TEXTURE3, gl.TEXTURE4]) {
       gl.activeTexture(unit);
       gl.bindTexture(gl.TEXTURE_2D, null);
@@ -507,9 +488,8 @@ export class Renderer {
     this.bindVolumeUniforms(prog, state);
     gl.uniformMatrix4fv(prog.uniforms['u_mvp'] ?? null, false, viewProj);
     gl.uniform3f(prog.uniforms['u_extent'] ?? null, this.extent[0], this.extent[1], this.extent[2]);
-    // Just above pure air in the current window. Tying the cutoff to the
-    // windowed value rather than a fixed HU means it keeps working on a lung
-    // window, where far more of the image is legitimately dark.
+    // Just above pure air, in windowed units rather than a fixed HU, so it still
+    // behaves on a lung window where much more of the image is legitimately dark.
     gl.uniform1f(prog.uniforms['u_airCutoff'] ?? null, 0.03);
     gl.bindVertexArray(this.quad);
 
@@ -528,10 +508,9 @@ export class Renderer {
     const gl = this.gl;
     const prog = this.progMesh;
 
-    // Surface nets reports vertices in voxel-index units scaled by spacing, so
-    // they sit half a voxel from this renderer's local mm origin, which puts
-    // voxel centres at (i+0.5)*spacing. Without this shift the surfaces would
-    // float half a voxel off the slice planes they were extracted from.
+    // Surface nets emits vertices in voxel-index units scaled by spacing, but
+    // this renderer puts voxel centres at (i+0.5)*spacing. Without the shift the
+    // surfaces float half a voxel off the slices they were extracted from.
     const model = glIdentity();
     model[12] = this.spacing[0] * 0.5;
     model[13] = this.spacing[1] * 0.5;
@@ -554,10 +533,9 @@ export class Renderer {
       return;
     }
 
-    // Translucent surfaces need back-to-front order, and must not write depth
-    // or they would hide the organs behind them. Leaving depth writes off also
-    // means the raycaster's rays pass through them, which is what a
-    // semi-transparent surface should do.
+    // Back to front, and no depth writes or they hide the organs behind them.
+    // Depth writes off also lets the raycaster's rays through, which is what a
+    // semi-transparent surface should do anyway.
     gl.enable(gl.BLEND);
     gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     gl.depthMask(false);
