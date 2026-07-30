@@ -173,7 +173,10 @@ function rescaledRange(values: TypedNumberArray, slope: number, intercept: numbe
   let rawMax = -Infinity;
   for (let i = 0; i < values.length; i++) {
     const v = values[i];
-    // NaN fails both comparisons, so non-finite float voxels drop out here.
+    // Derived float maps carry both NaN and +/-Infinity, and both have to go:
+    // min/max feed the window/level autoscaling, so one infinity there flattens
+    // the whole display. Comparison alone would only drop the NaN.
+    if (!Number.isFinite(v)) continue;
     if (v < rawMin) rawMin = v;
     if (v > rawMax) rawMax = v;
   }
@@ -233,6 +236,17 @@ export function reorientLike(image: NiftiImage, reference: Volume): TypedNumberA
   let worstIndex = -1;
   for (let i = 0; i < 16; i++) {
     const diff = Math.abs(plan.affine[i] - reference.affine[i]);
+    if (Number.isNaN(diff)) {
+      // NaN loses every comparison, so it needs its own arm: left to the
+      // accumulator below, the affine that should be rejected hardest (one that
+      // cannot be compared at all) would leave `worst` at 0 and pass as an
+      // exact match, and the mask would be drawn at an unknown position.
+      throw new Error(
+        `Grid mismatch: mask affine holds ${plan.affine[i]} at row ${Math.floor(i / 4)} col ` +
+          `${i % 4} against the reference's ${reference.affine[i]}, so the mask's world ` +
+          `placement cannot be compared. The mask header is malformed.`,
+      );
+    }
     if (diff > worst) {
       worst = diff;
       worstIndex = i;
