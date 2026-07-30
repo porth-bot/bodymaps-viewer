@@ -13,7 +13,6 @@ import { LAYOUT_LABELS, type LayoutMode } from '../gl/layout';
 import type { VolumeRenderMode } from '../gl/renderer';
 import {
   button, el, formatCount, formatVolume, rgbCss, section, segmented, select, slider, toggle,
-  type Control,
 } from './controls';
 import type { AppState, Store, Tool } from './store';
 
@@ -34,7 +33,6 @@ export interface Panels {
 }
 
 export function buildSidebar(root: HTMLElement, deps: PanelDeps): Panels {
-  const { store } = deps;
   const updaters: Array<(s: AppState) => void> = [];
 
   root.append(buildCasePanel(deps, updaters));
@@ -43,7 +41,6 @@ export function buildSidebar(root: HTMLElement, deps: PanelDeps): Panels {
   root.append(build3DPanel(deps, updaters));
   root.append(buildShortcutsPanel());
 
-  void store;
   return {
     update(state) {
       for (const u of updaters) u(state);
@@ -540,5 +537,3 @@ export function buildToolbar(
     tool.update(s.tool);
   });
 }
-
-export type { Control };

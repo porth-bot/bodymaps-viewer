@@ -588,7 +588,6 @@ export class Renderer {
     gl.bindVertexArray(null);
   }
 
-  /** Read back a single pixel of the 3D pass. Used to pick a surface under the pointer. */
   dispose(): void {
     const gl = this.gl;
     this.clearMeshes();

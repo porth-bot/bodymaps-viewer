@@ -10,7 +10,7 @@
 import type { OrbitCamera } from '../camera/orbit';
 import type { Renderer } from '../gl/renderer';
 import { rectAt, type ViewportRect } from '../gl/layout';
-import { PLANES, planeUvToVoxel, screenToPlaneUv, voxelToPlaneUv, planeUvToScreen } from '../gl/planes';
+import { PLANES, planeUvToVoxel, screenToPlaneUv } from '../gl/planes';
 import { clampVoxel } from '../core/volume';
 import type { Store, Tool, Measurement } from './store';
 import type { Vec3 } from '../core/mat4';
@@ -150,8 +150,6 @@ export class Interactions {
         // step by the current window means the same drag feels equally fast in
         // a 150 HU liver window and a 2000 HU bone window.
         const scale = Math.max(this.startWindow.window, 50) / 250;
-        const totalX = x - (this.lastX - dx);
-        void totalX;
         this.opts.store.set((s) => ({
           windowLevel: {
             window: Math.max(1, s.windowLevel.window + dx * scale * 2),
@@ -380,5 +378,3 @@ function makeMeasurement(
     lengthMm: Math.hypot(dx, dy, dz),
   };
 }
-
-export { planeUvToScreen, voxelToPlaneUv };
