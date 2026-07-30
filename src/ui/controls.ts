@@ -23,6 +23,16 @@ export interface Control<T> {
   update(value: T): void;
 }
 
+/**
+ * Unique ids so every `<label>` can point at the control it names.
+ *
+ * Without the association a screen reader reads the sliders and selects as
+ * unlabelled, and clicking the visible text does not focus the control, which
+ * everyone expects to work.
+ */
+let controlSeq = 0;
+const nextId = (prefix: string) => `${prefix}-${++controlSeq}`;
+
 export function section(title: string, options: { collapsed?: boolean } = {}): {
   root: HTMLElement;
   body: HTMLElement;
@@ -62,6 +72,8 @@ export function slider(opts: {
   head.append(name, readout);
 
   const input = el('input');
+  input.id = nextId('slider');
+  name.htmlFor = input.id;
   input.type = 'range';
   input.min = String(opts.min);
   input.max = String(opts.max);
@@ -152,8 +164,11 @@ export function select<T extends string>(opts: {
 }): Control<T> {
   const root = el('div', 'control');
   const head = el('div', 'control-head');
-  head.append(el('label', 'control-label', opts.label));
+  const name = el('label', 'control-label', opts.label);
+  head.append(name);
   const input = el('select', 'select');
+  input.id = nextId('select');
+  name.htmlFor = input.id;
   for (const o of opts.options) {
     const opt = el('option', undefined, o.label);
     opt.value = o.value;

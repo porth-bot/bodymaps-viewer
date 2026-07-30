@@ -209,10 +209,16 @@ export function glInvert(m: GLMat): GLMat {
 export function glNormalMatrix(model: GLMat): Float32Array {
   const a = new Float64Array(16);
   for (let i = 0; i < 16; i++) a[i] = model[i];
-  // Treat the column-major 4x4 as row-major for the inverse, then transpose
-  // back; the two flips cancel into exactly the inverse-transpose we want.
+  // Reading the column-major input as row-major already transposes it, so the
+  // inverse below is (M^T)^-1 = (M^-1)^T, held in row-major order. Writing
+  // element [r][c] of that into the column-major output means reading
+  // inv[r*4+c], not inv[c*4+r]. Reading it the other way returns M^-1, which
+  // agrees with the right answer only while the upper 3x3 is symmetric. That
+  // covers a pure translation or a uniform scale, so the mistake stays
+  // invisible until someone rotates or non-uniformly scales the model, and
+  // then tilts every normal (77 degrees for a rotated 0.82/2.5 mm grid).
   const inv = mat4Invert(a as unknown as Mat4);
   const out = new Float32Array(9);
-  for (let c = 0; c < 3; c++) for (let r = 0; r < 3; r++) out[c * 3 + r] = inv[c * 4 + r];
+  for (let c = 0; c < 3; c++) for (let r = 0; r < 3; r++) out[c * 3 + r] = inv[r * 4 + c];
   return out;
 }

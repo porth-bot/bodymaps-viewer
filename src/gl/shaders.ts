@@ -50,6 +50,21 @@ float windowed(float hu) {
   return clamp((hu - lo) / max(u_window, 1e-6), 0.0, 1.0);
 }
 
+/**
+ * Like windowed(), but with the bottom of the ramp pinned to the data floor.
+ *
+ * Only for deciding what to keep, never for what to display. A lung window
+ * runs from -1350 HU, which is below anything a CT records, so air at -1000 HU
+ * scores 0.23 on the display ramp rather than 0. Any "is this air" test
+ * against the raw window therefore stops recognising air the moment the user
+ * picks a wide window, and the slice planes in 3D turn back into opaque cards.
+ */
+float opacityRamp(float hu) {
+  float lo = max(u_level - 0.5 * u_window, u_huMin);
+  float hi = max(u_level + 0.5 * u_window, lo + 1e-6);
+  return clamp((hu - lo) / (hi - lo), 0.0, 1.0);
+}
+
 uint labelAt(vec3 uvw) {
   return texture(u_label, uvw).r;
 }
@@ -129,7 +144,10 @@ void main() {
         bool edge =
           labelAt(v_uvw + du) != lbl || labelAt(v_uvw - du) != lbl ||
           labelAt(v_uvw + dv) != lbl || labelAt(v_uvw - dv) != lbl;
-        alpha = edge ? c.a : 0.0;
+        // Still scaled by the global overlay gate. Dropping it here made
+        // outline mode ignore both "Show structures" and the opacity slider,
+        // so turning structures off left the contours on screen.
+        alpha = edge ? c.a * u_labelStyle.x : 0.0;
       }
       rgb = mix(rgb, c.rgb, alpha);
     }
@@ -172,7 +190,8 @@ void main() {
   const float EPS = 1e-4;
   if (any(lessThan(v_uvw, vec3(-EPS))) || any(greaterThan(v_uvw, vec3(1.0 + EPS)))) discard;
 
-  float g = windowed(sampleHU(v_uvw));
+  float hu = sampleHU(v_uvw);
+  float g = windowed(hu);
   uint lbl = labelAt(v_uvw);
 
   // Drop air. A slice plane in 3D is mostly empty space around the patient,
@@ -180,7 +199,10 @@ void main() {
   // and buries the anatomy in three big cards. Discarding air leaves the body
   // cross-section floating in place, which is what makes the plane readable
   // against the volume.
-  if (g < u_airCutoff && lbl == 0u) discard;
+  //
+  // Tested against the clamped ramp, not the display ramp, so the test still
+  // means "this is air" under a lung or full-range window.
+  if (opacityRamp(hu) < u_airCutoff && lbl == 0u) discard;
 
   vec3 rgb = vec3(g);
   if (lbl > 0u) {
@@ -299,6 +321,7 @@ uniform int   u_mode;          // 0 = composite, 1 = MIP, 2 = isosurface-lit com
 uniform float u_density;
 uniform int   u_shade;
 uniform float u_labelBoost;    // extra opacity for annotated structures
+uniform float u_labelTint;     // 0 when the segmentation overlay is switched off
 uniform sampler2D u_sceneColor;
 uniform sampler2D u_sceneDepth;
 uniform vec2  u_near_far;
@@ -315,13 +338,19 @@ bool intersectBox(vec3 ro, vec3 rd, vec3 boxMax, out float t0, out float t1) {
   return t1 > max(t0, 0.0);
 }
 
-// Central-difference gradient in texture space, rescaled to mm so anisotropic
-// voxels (0.82 x 0.82 x 2.5 mm here) do not tilt every normal toward z.
+// Central-difference gradient, returned in HU per millimetre.
+//
+// The caller samples one voxel either side, so each difference spans two voxel
+// widths: 2 * spacing millimetres, and spacing is u_extent/u_dims. Dividing by
+// u_extent instead (the whole volume span) is off by dims/2 per axis, which is
+// both a ~250x magnitude collapse, enough that the gradient-magnitude gate
+// below never engages and shading silently does nothing, and a per-axis
+// reweighting that tilts every normal toward whichever axis has fewest slices.
 vec3 gradient(vec3 uvw, vec3 stepUvw) {
   float dx = sampleHU(uvw + vec3(stepUvw.x, 0.0, 0.0)) - sampleHU(uvw - vec3(stepUvw.x, 0.0, 0.0));
   float dy = sampleHU(uvw + vec3(0.0, stepUvw.y, 0.0)) - sampleHU(uvw - vec3(0.0, stepUvw.y, 0.0));
   float dz = sampleHU(uvw + vec3(0.0, 0.0, stepUvw.z)) - sampleHU(uvw - vec3(0.0, 0.0, stepUvw.z));
-  return vec3(dx, dy, dz) / u_extent;
+  return vec3(dx, dy, dz) / (2.0 * u_extent / u_dims);
 }
 
 // Warm tissue ramp. Pure greyscale volume rendering reads as fog; biasing the
@@ -410,7 +439,10 @@ void main() {
     vec3 c = tissueColor(g);
 
     if (lc.a > 0.0) {
-      c = mix(c, lc.rgb, 0.85);
+      // The tint needs its own gate. Keying it off u_labelBoost alone left the
+      // volume painted in structure colours after the overlay was switched
+      // off, because the boost only controls added opacity, not colour.
+      c = mix(c, lc.rgb, 0.85 * u_labelTint);
       a = max(a, lc.a * u_labelBoost);
     }
 
@@ -446,8 +478,13 @@ void main() {
   }
 
   if (u_mode == 1) {
-    vec3 c = vec3(maxG);
-    fragColor = vec4(mix(sceneColor.rgb, c, maxG > 0.0 ? 1.0 : 0.0), 1.0);
+    // Composite the projection over the geometry using its own intensity as
+    // alpha, which is the same form the composite branch ends with. Replacing
+    // the scene outright wherever maxG exceeded zero erased every organ
+    // surface behind the volume, since almost any ray through a body finds
+    // some non-zero intensity. Rays already stop at sceneDist, so maxG only
+    // covers tissue in front of the surface.
+    fragColor = vec4(vec3(maxG) + (1.0 - maxG) * sceneColor.rgb, 1.0);
     return;
   }
 

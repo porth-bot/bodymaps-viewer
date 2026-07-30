@@ -156,22 +156,27 @@ export class Renderer {
    */
   setVolume(volume: Volume, normalized: Float32Array): void {
     const gl = this.gl;
+    // Upload before discarding anything. A volume past the driver's 3D texture
+    // limit throws here, and releasing the old texture first would leave the
+    // renderer holding a deleted handle with the new dimensions, so every
+    // later frame drew a black pane that no reload could recover. Failing this
+    // way costs one frame of double texture residency and keeps the previous
+    // case on screen behind the error banner.
+    const tex = createVolumeTexture(gl, volume.dims, normalized);
     if (this.volumeTex) gl.deleteTexture(this.volumeTex);
+    this.volumeTex = tex;
     this.dims = volume.dims;
     this.spacing = volume.spacing;
     this.extent = volume.extent;
     this.huMin = volume.min;
     this.huRange = Math.max(volume.max - volume.min, 1e-6);
-    this.volumeTex = createVolumeTexture(gl, volume.dims, normalized);
   }
 
   setLabels(labels: LabelVolume | null): void {
     const gl = this.gl;
-    if (this.labelTex) {
-      gl.deleteTexture(this.labelTex);
-      this.labelTex = null;
-    }
-    if (labels) this.labelTex = createLabelTexture(gl, labels.dims, labels.values);
+    const tex = labels ? createLabelTexture(gl, labels.dims, labels.values) : null;
+    if (this.labelTex) gl.deleteTexture(this.labelTex);
+    this.labelTex = tex;
   }
 
   /** rgba is 256*4 bytes: per-label colour and (visibility * opacity). */
@@ -456,6 +461,7 @@ export class Renderer {
       gl.uniform1f(prog.uniforms['u_density'] ?? null, state.volumeDensity);
       gl.uniform1i(prog.uniforms['u_shade'] ?? null, state.volumeShade ? 1 : 0);
       gl.uniform1f(prog.uniforms['u_labelBoost'] ?? null, state.showLabels ? state.volumeLabelBoost : 0);
+      gl.uniform1f(prog.uniforms['u_labelTint'] ?? null, state.showLabels && this.labelTex ? 1 : 0);
       const [near, far] = state.camera.nearFar();
       gl.uniform2f(prog.uniforms['u_near_far'] ?? null, near, far);
 

@@ -165,7 +165,7 @@ superior; the gallbladder is anterior to the aorta, so j runs anterior. The
 aorta is left of the inferior vena cava in the rendered axial view, which is the
 check that catches a left/right flip.
 
-The 167 tests in `tests/` cover the parser against synthesised NIfTI files in
+The 182 tests in `tests/` cover the parser against synthesised NIfTI files in
 both endiannesses, the quaternion affine path, the RAS resampling (asserting
 that `affine_new * voxel_new == affine_old * voxel_old`), and the mesher. Mesh
 tests assert closedness and manifoldness by checking every undirected edge is
@@ -213,7 +213,7 @@ npm run dev
 Then open http://localhost:5173. The sample case loads on its own.
 
 ```bash
-npm test          # 167 tests, including integration against the real case
+npm test          # 182 tests, including integration against the real case
 npm run typecheck
 npm run build
 ```

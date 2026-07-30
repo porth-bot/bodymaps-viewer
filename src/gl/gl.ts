@@ -214,7 +214,10 @@ export function createRenderTarget(gl: WebGL2RenderingContext, width: number, he
 
   gl.bindTexture(gl.TEXTURE_2D, color);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-  for (const p of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, p, gl.NEAREST);
+  // Linear on colour so the supersampled path actually resolves. Rendering the
+  // 3D pass at 1.5x and then point-sampling it back down just throws away the
+  // extra samples, which is the whole reason for rendering large.
+  for (const p of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, p, gl.LINEAR);
   for (const p of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, p, gl.CLAMP_TO_EDGE);
 
   gl.bindTexture(gl.TEXTURE_2D, depth);

@@ -30,7 +30,14 @@ let measurementId = 1;
 
 export class Interactions {
   private drag: DragMode = 'none';
-  private dragView: ViewportRect | null = null;
+  /**
+   * Which pane the drag started in, by identity rather than by geometry.
+   * Caching the rect meant a layout change mid-drag (a double click, or a
+   * keyboard shortcut) kept feeding stale coordinates to the pointer maths,
+   * so the crosshair jumped to a position computed against a pane that had
+   * moved.
+   */
+  private dragViewKind: string | null = null;
   private lastX = 0;
   private lastY = 0;
   private startWindow = { level: 0, window: 1 };
@@ -99,7 +106,7 @@ export class Interactions {
     if (!state.volume) return;
 
     this.el.setPointerCapture(e.pointerId);
-    this.dragView = rect;
+    this.dragViewKind = rect.view;
     this.lastX = x;
     this.lastY = y;
     this.drag = this.modeFor(e, rect, state.tool);
@@ -133,7 +140,11 @@ export class Interactions {
       return;
     }
 
-    const rect = this.dragView;
+    // Re-resolve the pane every move, so a layout change mid-drag is picked
+    // up instead of the drag continuing against the pane's old rectangle.
+    const rect = this.dragViewKind
+      ? this.opts.renderer.viewportRects.find((r) => r.view === this.dragViewKind) ?? null
+      : null;
     if (!rect) return;
     const dx = x - this.lastX;
     const dy = y - this.lastY;
@@ -224,7 +235,7 @@ export class Interactions {
       this.rulerStart = null;
     }
     this.drag = 'none';
-    this.dragView = null;
+    this.dragViewKind = null;
     if (this.el.hasPointerCapture(e.pointerId)) this.el.releasePointerCapture(e.pointerId);
     this.opts.requestRender();
   };
@@ -304,9 +315,27 @@ export class Interactions {
   }
 
   private onKeyDown = (e: KeyboardEvent): void => {
+    // Leave browser and OS chords alone. Every binding here is an unmodified
+    // key or a Shift chord, so without this Cmd+R reset the views and
+    // swallowed the reload, and Ctrl+L, Cmd+P and friends did the same.
+    // Shift is deliberately not in this test: Shift+Arrow is a real binding.
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+
     const target = e.target as HTMLElement | null;
-    // Never steal keys from a control the user is actually typing in.
-    if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+    if (target) {
+      const tag = target.tagName;
+      const type = tag === 'INPUT' ? (target as HTMLInputElement).type : '';
+      // Only text entry should swallow every key. Treating all INPUTs that way
+      // killed the shortcuts for the rest of the session the moment anyone
+      // clicked a checkbox or a slider, because focus stays on that control.
+      const consumesText =
+        tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable ||
+        (tag === 'INPUT' && !/^(checkbox|radio|button|submit|reset|file|range)$/.test(type));
+      if (consumesText) return;
+      // A focused widget still owns the keys it natively handles.
+      if (e.key === ' ' || e.key === 'Enter') return;
+      if (type === 'range' && /^(Arrow|Home|End|Page)/.test(e.key)) return;
+    }
 
     const store = this.opts.store;
     const state = store.get();

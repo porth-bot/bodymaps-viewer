@@ -94,7 +94,20 @@ function boot(): void {
     },
 
     onVolume(volume: Volume, normalized: Float32Array, ms: number) {
-      renderer.setVolume(volume, normalized);
+      // The upload is the one step that can fail on the GPU rather than in the
+      // parser, typically a volume larger than the driver's 3D texture limit.
+      // It has to surface as the error it is; letting it escape the worker
+      // callback left the app stuck on the progress overlay with the real
+      // reason only in the console.
+      try {
+        renderer.setVolume(volume, normalized);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        store.set({ status: 'error', error: message, progress: null });
+        showError(message);
+        hideProgress();
+        return;
+      }
       camera.frame(volume.extent);
       camera.reset();
 
@@ -128,7 +141,14 @@ function boot(): void {
     },
 
     onLabels(labels: LabelVolume, ms: number) {
-      renderer.setLabels(labels);
+      try {
+        renderer.setLabels(labels);
+      } catch (err) {
+        // The scan is already on screen and usable, so a failed label upload
+        // is a warning rather than a dead end.
+        showError(`Structures could not be displayed: ${err instanceof Error ? err.message : String(err)}`);
+        return;
+      }
       const structures = labels.structures;
       renderer.setLut(buildLut(structures));
       const meshStatus = Object.fromEntries(structures.map((s) => [s.index, 'queued' as const]));
@@ -137,6 +157,10 @@ function boot(): void {
         structures,
         meshStatus,
         progress: null,
+        // The mask progress messages flipped status back to 'loading' after
+        // the scan arrived, and nothing set it back, so the app read as
+        // permanently loading once a case finished.
+        status: 'ready',
         timings: { ...store.get().timings, labelsMs: ms },
       });
       for (const s of structures) {
