@@ -632,178 +632,127 @@ describe('extractOrganMesh on a synthetic sphere mask', () => {
   });
 });
 
-/**
- * Both guards below compare the shipped code against a local reimplementation
- * that differs from it in exactly one way, the defect being guarded, and run
- * the two interleaved so machine speed, thermal drift and JIT state cancel out
- * of the ratio. That is what makes a timing assertion here reproducible: the
- * threshold is a shape of the code, not a number of milliseconds.
- */
-function raceBestOf(trials: number, a: () => void, b: () => void): [number, number] {
-  let bestA = Infinity;
-  let bestB = Infinity;
-  for (let t = 0; t < trials; t++) {
-    let start = performance.now();
-    a();
-    const elapsedA = performance.now() - start;
-    start = performance.now();
-    b();
-    const elapsedB = performance.now() - start;
-    if (elapsedA < bestA) bestA = elapsedA;
-    if (elapsedB < bestB) bestB = elapsedB;
-  }
-  return [bestA, bestB];
-}
-
-/**
- * The cell scan as it was before the sign test came first: all eight corner
- * values written into a scratch array, only for the early-out to throw 97% of
- * them away on the next line.
- */
-function scanFillingScratch(field: Float32Array, dims: [number, number, number], isoValue: number): number {
+/** Cells of `field` whose eight corners are not all on one side of `isoValue`. */
+function countStraddlingCells(
+  field: Float32Array,
+  dims: [number, number, number],
+  isoValue: number,
+): number {
   const [nx, ny, nz] = dims;
-  const strideY = nx;
-  const strideZ = nx * ny;
-  const cornerOffset = new Int32Array([
-    0, 1, strideY, strideY + 1, strideZ, strideZ + 1, strideZ + strideY, strideZ + strideY + 1,
-  ]);
-  const cnx = nx - 1;
-  const cny = ny - 1;
-  const g = new Float64Array(8);
-  let below = new Int32Array(cnx * cny);
-  let cur = new Int32Array(cnx * cny);
+  const offsets = [0, 1, nx, nx + 1, nx * ny, nx * ny + 1, nx * ny + nx, nx * ny + nx + 1];
   let straddling = 0;
   for (let k = 0; k < nz - 1; k++) {
-    for (let j = 0; j < cny; j++) {
-      const rowBase = k * strideZ + j * strideY;
-      const cellRow = j * cnx;
-      for (let i = 0; i < cnx; i++) {
-        const base = rowBase + i;
+    for (let j = 0; j < ny - 1; j++) {
+      for (let i = 0; i < nx - 1; i++) {
+        const base = (k * ny + j) * nx + i;
         let mask = 0;
-        for (let c = 0; c < 8; c++) {
-          const v = field[base + cornerOffset[c]] - isoValue;
-          g[c] = v;
-          if (v > 0) mask |= 1 << c;
-        }
-        if (mask === 0 || mask === 255) {
-          cur[cellRow + i] = -1;
-          continue;
-        }
-        straddling++;
-      }
-    }
-    const swap = below;
-    below = cur;
-    cur = swap;
-  }
-  return straddling + (below[0] & 0);
-}
-
-/** The crop as it was with the stride-block loops nested inside the x loop. */
-function cropWithNestedBlockLoops(
-  mask: Uint8Array,
-  dims: [number, number, number],
-  clip: [number, number, number, number, number, number],
-  lo: [number, number, number],
-  coarse: [number, number, number],
-  stride: number,
-): Float32Array {
-  const [nx, ny] = dims;
-  const [cnx, cny, cnz] = coarse;
-  const [ci0, cj0, ck0, ci1, cj1, ck1] = clip;
-  const field = new Float32Array(cnx * cny * cnz);
-  const invBlock = 1 / (stride * stride * stride);
-  const planeStride = nx * ny;
-  for (let cz = 0; cz < cnz; cz++) {
-    const zBase = lo[2] + cz * stride;
-    for (let cy = 0; cy < cny; cy++) {
-      const yBase = lo[1] + cy * stride;
-      const out = (cz * cny + cy) * cnx;
-      for (let cx = 0; cx < cnx; cx++) {
-        const xBase = lo[0] + cx * stride;
-        let sum = 0;
-        for (let dz = 0; dz < stride; dz++) {
-          const z = zBase + dz;
-          if (z < ck0 || z > ck1) continue;
-          for (let dy = 0; dy < stride; dy++) {
-            const y = yBase + dy;
-            if (y < cj0 || y > cj1) continue;
-            const rowBase = z * planeStride + y * nx;
-            const xStart = Math.max(0, ci0 - xBase);
-            const xEnd = Math.min(stride, ci1 - xBase + 1);
-            for (let dx = xStart; dx < xEnd; dx++) {
-              if (mask[rowBase + xBase + dx] !== 0) sum++;
-            }
-          }
-        }
-        field[out + cx] = sum * invBlock;
+        for (let c = 0; c < 8; c++) if (field[base + offsets[c]] > isoValue) mask |= 1 << c;
+        if (mask !== 0 && mask !== 255) straddling++;
       }
     }
   }
-  return field;
+  return straddling;
 }
 
-describe('cost of the passes that scale with the volume', () => {
-  const n = 96;
-  const dims: [number, number, number] = [n, n, n];
+/** Run `body` and report how many times it clamped a value with Math.max/min. */
+function countingClamps(body: () => void): number {
+  const { max, min } = Math;
+  let calls = 0;
+  try {
+    Math.max = (...values: number[]): number => {
+      calls++;
+      return max(...values);
+    };
+    Math.min = (...values: number[]): number => {
+      calls++;
+      return min(...values);
+    };
+    body();
+  } finally {
+    Math.max = max;
+    Math.min = min;
+  }
+  return calls;
+}
 
-  it('discards a cell without touching its corner values', () => {
-    const field = new Float32Array(n * n * n);
-    const reps = 4;
-    const shipped = (): void => {
-      for (let r = 0; r < reps; r++) {
-        surfaceNets({ field, dims, spacing: [1, 1, 1], isoValue: 0.5, origin: [0, 0, 0] });
-      }
-    };
-    const withScratchFill = (): void => {
-      for (let r = 0; r < reps; r++) scanFillingScratch(field, dims, 0.5);
-    };
-    for (let warm = 0; warm < 4; warm++) {
-      shipped();
-      withScratchFill();
-    }
-    const [ours, theirs] = raceBestOf(9, shipped, withScratchFill);
-    console.log(`  cell scan ${ours.toFixed(1)} ms vs ${theirs.toFixed(1)} ms filling scratch`);
-    // Measures 0.37-0.43 as written and 0.89 with the scratch fill restored.
-    expect(ours / theirs).toBeLessThan(0.65);
+/** Wrap a field so every indexed read of it is counted. */
+function countingField(field: Float32Array): { counted: Float32Array; reads: () => number } {
+  let reads = 0;
+  const counted = new Proxy(field, {
+    get(target, key) {
+      if (typeof key === 'string' && Number.isInteger(Number(key))) reads++;
+      return Reflect.get(target, key);
+    },
+  });
+  return { counted, reads: () => reads };
+}
+
+describe('cost of the passes that run once per voxel', () => {
+  it('discards a cell before materialising its corner values', () => {
+    // The cell loop runs once per voxel of the crop and throws away 97% of
+    // what it looks at (3.66M of the reference liver's 3.78M cells), so the
+    // discard path is the hottest code in the pipeline. Deciding it from the
+    // corner signs alone, and fetching the values only for the cells that
+    // survive, took 25% off this pass; writing all eight into a scratch array
+    // first, as this used to, pays a Float64 store per corner for every cell
+    // in the volume.
+    //
+    // Read counting rather than a stopwatch: a timing threshold for a 25%
+    // difference is not reproducible across machines, and the read pattern is
+    // exactly what the two shapes disagree about. Fetching the values into
+    // locals during the sign test would be a third shape, faster still and
+    // failing this test, so revisit it here rather than deleting it.
+    const size = 24;
+    const cellDims: [number, number, number] = [size, size, size];
+    const field = sphereField(size, 8, [11.5, 11.5, 11.5]);
+    const cells = (size - 1) ** 3;
+    const straddling = countStraddlingCells(field, cellDims, 0);
+    expect(straddling).toBeGreaterThan(500);
+    expect(straddling * 8).toBeLessThan(cells);
+
+    const { counted, reads } = countingField(field);
+    const mesh = surfaceNets({
+      field: counted,
+      dims: cellDims,
+      spacing: [1, 1, 1],
+      isoValue: 0,
+      origin: [0, 0, 0],
+    });
+    expect(mesh.indices.length).toBeGreaterThan(0);
+    expect(reads()).toBe(8 * cells + 8 * straddling);
   });
 
-  it('clamps a crop column once per column, not once per sample', () => {
-    // A box far larger than the structure inside it, and no blur, so almost
-    // all the work is reading voxels.
+  it('clamps a crop block once per block, not once per sample', () => {
+    // The crop is the other pass that runs once per voxel of the volume, and
+    // it used to re-derive the stride block's extent, with a Math.max and a
+    // Math.min per axis, inside the innermost loop, where none of it varies.
+    // Hoisting it was 2.8x on the full-resolution crop of the reference liver.
+    //
+    // Counting the clamps rather than timing them, for the same reason as
+    // above: a threshold in milliseconds is not reproducible, and the whole
+    // difference between the two shapes is where the clamping sits.
+    const n = 96;
+    const dims: [number, number, number] = [n, n, n];
     const mask = boxMask(n, [46, 46, 46, 49, 49, 49]);
     const bounds: [number, number, number, number, number, number] = [3, 3, 3, n - 4, n - 4, n - 4];
-    const pad = 2;
-    const lo: [number, number, number] = [bounds[0] - pad, bounds[1] - pad, bounds[2] - pad];
-    const coarse: [number, number, number] = [
-      bounds[3] + pad - lo[0] + 1, bounds[4] + pad - lo[1] + 1, bounds[5] + pad - lo[2] + 1,
-    ];
-    const reps = 3;
-    const shipped = (): void => {
-      for (let r = 0; r < reps; r++) {
-        extractOrganMesh({ mask, dims, spacing: [1, 1, 1], bounds, blurPasses: 0, smoothIterations: 0 });
-      }
-    };
-    const nested = (): void => {
-      for (let r = 0; r < reps; r++) {
-        const field = cropWithNestedBlockLoops(mask, dims, bounds, lo, coarse, 1);
-        surfaceNets({
-          field: boxBlur3(field, coarse, 0),
-          dims: coarse,
+    for (const stride of [1, 3]) {
+      const clamps = countingClamps(() => {
+        extractOrganMesh({
+          mask,
+          dims,
           spacing: [1, 1, 1],
-          isoValue: 0.5,
-          origin: lo,
+          bounds,
+          decimateStride: stride,
+          blurPasses: 0,
+          smoothIterations: 0,
         });
-      }
-    };
-    for (let warm = 0; warm < 4; warm++) {
-      shipped();
-      nested();
+      });
+      // Samples the crop writes. Clamping per sample means two of these; as
+      // written it is 20 for the whole full-resolution crop and 2224 for the
+      // stride-3 one, which is per block column and block row.
+      const samples = (n - 5 + 2 * stride) ** 3 / stride ** 3;
+      expect(clamps, `stride ${stride}`).toBeLessThan(samples / 10);
     }
-    const [ours, theirs] = raceBestOf(9, shipped, nested);
-    console.log(`  crop pipeline ${ours.toFixed(1)} ms vs ${theirs.toFixed(1)} ms with nested block loops`);
-    // Measures 0.57-0.60; the two pipelines share everything but the crop.
-    expect(ours / theirs).toBeLessThan(0.8);
   });
 });
 

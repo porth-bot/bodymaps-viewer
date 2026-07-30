@@ -25,7 +25,8 @@
  * partitioned into its surface components first (see `pairFaceCrossings`) and
  * emits one vertex per component. In the overwhelmingly common case there is
  * exactly one component and this costs nothing but the bookkeeping. With it, all
- * nine reference organ masks come out strictly manifold at the default blur.
+ * nine reference organ masks come out strictly manifold at full resolution and
+ * the default blur.
  *
  * Known limit: one pathological case survives, where a single surface component
  * of a cell leaves and re-enters through the same ambiguous face. Splitting that
@@ -34,12 +35,14 @@
  * a boundary instead. Properly fixing it means subdividing the cell, which is
  * what manifold dual contouring does and what this deliberately does not. It
  * needs field detail comparable to the sample spacing to occur at all, so it is
- * rare but not absent from the reference data: at the three blur passes the app
- * runs it costs the liver exactly two edges out of 340k, and a stride-3 kidney
- * preview one. When it happens the mesh is still closed and consistently
- * oriented, so normals and the divergence-theorem volume stay correct (the liver
- * still measures to within 0.3% of its voxel count). Only the "exactly two
- * triangles per edge" property is lost, at those edges.
+ * rare but not absent from the reference data. At full resolution only the liver
+ * hits it, and only at the three blur passes the app runs, costing two edges out
+ * of 337k. Decimated previews sample coarsely enough to meet it more often: the
+ * pancreas does at strides 2, 3 and 4, always for one or two edges. When it
+ * happens the mesh is still closed and consistently oriented, so normals and the
+ * divergence-theorem volume stay correct (the liver still measures to within
+ * 0.3% of its voxel count). Only the "exactly two triangles per edge" property
+ * is lost, at those edges.
  *
  * COORDINATE CONTRACT: everything here works in "volume local millimetres",
  * defined as voxelIndex * spacing with the origin at voxel (0,0,0). The world
@@ -337,8 +340,9 @@ export function surfaceNets(input: SurfaceNetsInput): RawMesh {
         const base = rowBase + i;
         // Sign test only. Nearly every cell in a volume is discarded on the
         // next line (97% of the reference liver crop), and filling `g` for
-        // those costs more than the whole rest of the pass: fl(a - b) > 0 is
-        // exactly a > b for doubles, so the comparison alone decides it.
+        // those was a quarter of this pass. fl(a - b) > 0 is exactly a > b for
+        // doubles, so the comparison alone decides it, and the cells that
+        // survive fetch the values below.
         let mask = 0;
         for (let c = 0; c < 8; c++) {
           if (field[base + cornerOffset[c]] > isoValue) mask |= 1 << c;
@@ -737,12 +741,14 @@ function cropOccupancy(
   const planeStride = nx * ny;
   const x0 = Math.max(ci0, lo[0]);
   const x1 = Math.min(ci1, lo[0] + cnx - 1);
-  const z1 = Math.min(ck1, lo[2] + cnz - 1);
+  const y0 = Math.max(cj0, lo[1]);
   const y1 = Math.min(cj1, lo[1] + cny - 1);
+  const z0 = Math.max(ck0, lo[2]);
+  const z1 = Math.min(ck1, lo[2] + cnz - 1);
 
-  for (let z = Math.max(ck0, lo[2]); z <= z1; z++) {
+  for (let z = z0; z <= z1; z++) {
     const outZ = (z - lo[2]) * cny;
-    for (let y = Math.max(cj0, lo[1]); y <= y1; y++) {
+    for (let y = y0; y <= y1; y++) {
       const src = z * planeStride + y * nx;
       const out = (outZ + y - lo[1]) * cnx - lo[0];
       for (let x = x0; x <= x1; x++) {

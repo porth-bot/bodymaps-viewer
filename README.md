@@ -117,9 +117,16 @@ Writing this surfaced a real defect in the textbook algorithm. A cell can
 contain two disjoint sheets of surface, and collapsing both onto one dual vertex
 creates an edge shared by four triangles. It is not hypothetical: the reference
 liver mask hits it seven times. `pairFaceCrossings` partitions each cell into
-its surface components and emits one vertex per component. With that, all nine
-reference masks come out strictly manifold. The one remaining pathological case
-is documented honestly at the top of `surfaceNets.ts`.
+its surface components and emits one vertex per component.
+
+One pathological case survives, where a single component leaves and re-enters a
+cell through the same ambiguous face. Fixing it properly means subdividing the
+cell, which is what manifold dual contouring does and what this deliberately
+does not. At the settings the app ships it costs the liver two edges out of
+337,000 and leaves the other eight organs strictly manifold. Even at those
+edges the mesh is still closed and consistently oriented, so normals and the
+divergence-theorem volume stay correct. The top of `surfaceNets.ts` says all of
+this rather than claiming a guarantee the code does not quite make.
 
 Extraction runs in a pool of web workers, so the slices stay interactive while
 surfaces build in the background.
@@ -158,7 +165,7 @@ superior; the gallbladder is anterior to the aorta, so j runs anterior. The
 aorta is left of the inferior vena cava in the rendered axial view, which is the
 check that catches a left/right flip.
 
-The 144 tests in `tests/` cover the parser against synthesised NIfTI files in
+The 167 tests in `tests/` cover the parser against synthesised NIfTI files in
 both endiannesses, the quaternion affine path, the RAS resampling (asserting
 that `affine_new * voxel_new == affine_old * voxel_old`), and the mesher. Mesh
 tests assert closedness and manifoldness by checking every undirected edge is
@@ -206,7 +213,7 @@ npm run dev
 Then open http://localhost:5173. The sample case loads on its own.
 
 ```bash
-npm test          # 144 tests, including integration against the real case
+npm test          # 167 tests, including integration against the real case
 npm run typecheck
 npm run build
 ```
