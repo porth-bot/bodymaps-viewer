@@ -472,6 +472,18 @@ export class Renderer {
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
       gl.bindVertexArray(null);
     }
+
+    // Release the offscreen attachments from their sampler units. Leaving them
+    // bound means the next frame binds the same framebuffer for drawing while
+    // its own colour and depth textures are still attached to samplers, which
+    // is a feedback loop the spec leaves undefined. Nothing in the mesh or
+    // plane programs reads those units, so it is currently harmless, but it is
+    // one added texture fetch away from being a driver-specific bug.
+    for (const unit of [gl.TEXTURE3, gl.TEXTURE4]) {
+      gl.activeTexture(unit);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+    }
+    gl.activeTexture(gl.TEXTURE0);
   }
 
   private drawSlicePlanes3D(viewProj: GLMat, state: RenderState): void {

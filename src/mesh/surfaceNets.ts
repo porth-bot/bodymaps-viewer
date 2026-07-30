@@ -646,13 +646,12 @@ export function extractOrganMesh(opts: ExtractOrganMeshOptions): OrganMesh {
   let raw = meshAtBlur(blurPasses);
   // The blur runs before the threshold, so a structure thinner than about
   // 2 * blurPasses voxels never reaches the isovalue anywhere and comes back as
-  // an empty mesh the caller cannot tell from an empty mask. Back the blur off
-  // until a surface appears: a blocky adrenal gland beats a missing one.
+  // an empty mesh, byte for byte what an empty mask returns. Drop the blur
+  // rather than the structure. Backing it off one pass at a time instead would
+  // keep whichever sliver survives, and that sliver is not the structure: a
+  // 3-voxel cube meshes at 11% of its volume at one pass and 72% at none.
   if (raw.indices.length === 0 && blurPasses > 0 && maxSample(field) > ISO_VALUE) {
-    for (let passes = blurPasses - 1; passes >= 0; passes--) {
-      raw = meshAtBlur(passes);
-      if (raw.indices.length > 0) break;
-    }
+    raw = meshAtBlur(0);
   }
   if (raw.indices.length === 0) return emptyMesh();
 

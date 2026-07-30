@@ -4,7 +4,7 @@ import { describe, it, expect } from 'vitest';
 import { surfaceNets, computeNormals, meshBounds, extractOrganMesh } from '../src/mesh/surfaceNets';
 import { taubinSmooth } from '../src/mesh/smooth';
 import { boxBlur3 } from '../src/mesh/blur';
-import type { RawMesh } from '../src/mesh/surfaceNets';
+import type { RawMesh, OrganMesh } from '../src/mesh/surfaceNets';
 
 const SEGMENTATIONS = '../public/data/BDMAP_00000338/segmentations';
 const LIVER_NII = new URL(`${SEGMENTATIONS}/liver.nii.gz`, import.meta.url);
@@ -152,6 +152,45 @@ function checkManifold(indices: Uint32Array, vertexCount: number): ManifoldRepor
     }
   }
   return { edgeCount: uses.size, badEdges, unbalancedEdges, firstBad };
+}
+
+/**
+ * Rebuild an index set from vertex positions, merging vertices that land on the
+ * same point. Used to check a mesh whose coordinates moved: the original index
+ * array is unchanged by construction and so proves nothing about them.
+ */
+function weldByPosition(
+  positions: Float32Array,
+  indices: Uint32Array,
+): { indices: Uint32Array; vertexCount: number } {
+  // A tenth of a micron, far below anything meshing at millimetre scale
+  // produces, so only genuinely coincident vertices collapse.
+  const quantise = (v: number): number => Math.round(v * 1e4);
+  const ids = new Map<string, number>();
+  const remap = new Uint32Array(positions.length / 3);
+  for (let v = 0; v < remap.length; v++) {
+    const key = `${quantise(positions[v * 3])},${quantise(positions[v * 3 + 1])},${quantise(positions[v * 3 + 2])}`;
+    let id = ids.get(key);
+    if (id === undefined) {
+      id = ids.size;
+      ids.set(key, id);
+    }
+    remap[v] = id;
+  }
+  const welded = new Uint32Array(indices.length);
+  for (let i = 0; i < indices.length; i++) welded[i] = remap[indices[i]];
+  return { indices: welded, vertexCount: ids.size };
+}
+
+/** Solid axis-aligned box mask in an n^3 volume, inclusive of both corners. */
+function boxMask(n: number, box: [number, number, number, number, number, number]): Uint8Array {
+  const mask = new Uint8Array(n * n * n);
+  for (let k = box[2]; k <= box[5]; k++) {
+    for (let j = box[1]; j <= box[4]; j++) {
+      for (let i = box[0]; i <= box[3]; i++) mask[(k * n + j) * n + i] = 1;
+    }
+  }
+  return mask;
 }
 
 function radiusStats(
@@ -489,11 +528,22 @@ describe('taubinSmooth', () => {
     expect(out).toEqual(mesh.positions);
   });
 
-  it('keeps the mesh manifold', () => {
+  it('keeps the smoothed mesh a closed manifold', () => {
     const smoothed = taubinSmooth(mesh.positions, mesh.indices, 12);
     expect(smoothed.length).toBe(mesh.positions.length);
-    const report = checkManifold(mesh.indices, mesh.positions.length / 3);
+    expect(smoothed.every(Number.isFinite)).toBe(true);
+
+    // Re-index by position instead of reusing the index array, which the
+    // smoother cannot touch and which therefore says nothing about its output.
+    // Welding is what notices vertices that were fused, collapsed or filled
+    // with NaN, and only then does the manifold check describe the mesh that
+    // actually came out of the smoother.
+    const welded = weldByPosition(smoothed, mesh.indices);
+    expect(welded.vertexCount).toBe(mesh.positions.length / 3);
+    const report = checkManifold(welded.indices, welded.vertexCount);
+    expect(report.firstBad).toBeNull();
     expect(report.badEdges).toBe(0);
+    expect(enclosedVolume(smoothed, welded.indices)).toBeGreaterThan(0);
   });
 });
 
@@ -567,9 +617,10 @@ describe('extractOrganMesh on a synthetic sphere mask', () => {
     // A preview only promises closed and consistently oriented; see the note on
     // pinch cells in surfaceNets.ts.
     expect(checkManifold(preview.indices, preview.positions.length / 3).unbalancedEdges).toBe(0);
-    // Blurring at the coarse scale shifts a curved boundary inward by roughly
-    // the blur variance times the curvature, so a preview reads a few percent
-    // small on anything this tightly curved. That is the speed/accuracy trade.
+    // Blurring shifts a curved boundary inward by roughly the blur variance
+    // times the curvature, so a preview reads small, and it is the decimation
+    // that sets how small: this radius-18 sphere is the gentle case. See the
+    // real-mask preview test for the figures that actually bound the trade.
     const expected = (4 / 3) * Math.PI * radius ** 3;
     const actual = enclosedVolume(preview.positions, preview.indices);
     expect(actual).toBeLessThan(expected);
@@ -578,6 +629,334 @@ describe('extractOrganMesh on a synthetic sphere mask', () => {
     const fb = full.bounds;
     const pb = preview.bounds;
     for (let a = 0; a < 6; a++) expect(Math.abs(pb[a] - fb[a])).toBeLessThan(2.5);
+  });
+});
+
+/**
+ * Both guards below compare the shipped code against a local reimplementation
+ * that differs from it in exactly one way, the defect being guarded, and run
+ * the two interleaved so machine speed, thermal drift and JIT state cancel out
+ * of the ratio. That is what makes a timing assertion here reproducible: the
+ * threshold is a shape of the code, not a number of milliseconds.
+ */
+function raceBestOf(trials: number, a: () => void, b: () => void): [number, number] {
+  let bestA = Infinity;
+  let bestB = Infinity;
+  for (let t = 0; t < trials; t++) {
+    let start = performance.now();
+    a();
+    const elapsedA = performance.now() - start;
+    start = performance.now();
+    b();
+    const elapsedB = performance.now() - start;
+    if (elapsedA < bestA) bestA = elapsedA;
+    if (elapsedB < bestB) bestB = elapsedB;
+  }
+  return [bestA, bestB];
+}
+
+/**
+ * The cell scan as it was before the sign test came first: all eight corner
+ * values written into a scratch array, only for the early-out to throw 97% of
+ * them away on the next line.
+ */
+function scanFillingScratch(field: Float32Array, dims: [number, number, number], isoValue: number): number {
+  const [nx, ny, nz] = dims;
+  const strideY = nx;
+  const strideZ = nx * ny;
+  const cornerOffset = new Int32Array([
+    0, 1, strideY, strideY + 1, strideZ, strideZ + 1, strideZ + strideY, strideZ + strideY + 1,
+  ]);
+  const cnx = nx - 1;
+  const cny = ny - 1;
+  const g = new Float64Array(8);
+  let below = new Int32Array(cnx * cny);
+  let cur = new Int32Array(cnx * cny);
+  let straddling = 0;
+  for (let k = 0; k < nz - 1; k++) {
+    for (let j = 0; j < cny; j++) {
+      const rowBase = k * strideZ + j * strideY;
+      const cellRow = j * cnx;
+      for (let i = 0; i < cnx; i++) {
+        const base = rowBase + i;
+        let mask = 0;
+        for (let c = 0; c < 8; c++) {
+          const v = field[base + cornerOffset[c]] - isoValue;
+          g[c] = v;
+          if (v > 0) mask |= 1 << c;
+        }
+        if (mask === 0 || mask === 255) {
+          cur[cellRow + i] = -1;
+          continue;
+        }
+        straddling++;
+      }
+    }
+    const swap = below;
+    below = cur;
+    cur = swap;
+  }
+  return straddling + (below[0] & 0);
+}
+
+/** The crop as it was with the stride-block loops nested inside the x loop. */
+function cropWithNestedBlockLoops(
+  mask: Uint8Array,
+  dims: [number, number, number],
+  clip: [number, number, number, number, number, number],
+  lo: [number, number, number],
+  coarse: [number, number, number],
+  stride: number,
+): Float32Array {
+  const [nx, ny] = dims;
+  const [cnx, cny, cnz] = coarse;
+  const [ci0, cj0, ck0, ci1, cj1, ck1] = clip;
+  const field = new Float32Array(cnx * cny * cnz);
+  const invBlock = 1 / (stride * stride * stride);
+  const planeStride = nx * ny;
+  for (let cz = 0; cz < cnz; cz++) {
+    const zBase = lo[2] + cz * stride;
+    for (let cy = 0; cy < cny; cy++) {
+      const yBase = lo[1] + cy * stride;
+      const out = (cz * cny + cy) * cnx;
+      for (let cx = 0; cx < cnx; cx++) {
+        const xBase = lo[0] + cx * stride;
+        let sum = 0;
+        for (let dz = 0; dz < stride; dz++) {
+          const z = zBase + dz;
+          if (z < ck0 || z > ck1) continue;
+          for (let dy = 0; dy < stride; dy++) {
+            const y = yBase + dy;
+            if (y < cj0 || y > cj1) continue;
+            const rowBase = z * planeStride + y * nx;
+            const xStart = Math.max(0, ci0 - xBase);
+            const xEnd = Math.min(stride, ci1 - xBase + 1);
+            for (let dx = xStart; dx < xEnd; dx++) {
+              if (mask[rowBase + xBase + dx] !== 0) sum++;
+            }
+          }
+        }
+        field[out + cx] = sum * invBlock;
+      }
+    }
+  }
+  return field;
+}
+
+describe('cost of the passes that scale with the volume', () => {
+  const n = 96;
+  const dims: [number, number, number] = [n, n, n];
+
+  it('discards a cell without touching its corner values', () => {
+    const field = new Float32Array(n * n * n);
+    const reps = 4;
+    const shipped = (): void => {
+      for (let r = 0; r < reps; r++) {
+        surfaceNets({ field, dims, spacing: [1, 1, 1], isoValue: 0.5, origin: [0, 0, 0] });
+      }
+    };
+    const withScratchFill = (): void => {
+      for (let r = 0; r < reps; r++) scanFillingScratch(field, dims, 0.5);
+    };
+    for (let warm = 0; warm < 4; warm++) {
+      shipped();
+      withScratchFill();
+    }
+    const [ours, theirs] = raceBestOf(9, shipped, withScratchFill);
+    console.log(`  cell scan ${ours.toFixed(1)} ms vs ${theirs.toFixed(1)} ms filling scratch`);
+    // Measures 0.37-0.43 as written and 0.89 with the scratch fill restored.
+    expect(ours / theirs).toBeLessThan(0.65);
+  });
+
+  it('clamps a crop column once per column, not once per sample', () => {
+    // A box far larger than the structure inside it, and no blur, so almost
+    // all the work is reading voxels.
+    const mask = boxMask(n, [46, 46, 46, 49, 49, 49]);
+    const bounds: [number, number, number, number, number, number] = [3, 3, 3, n - 4, n - 4, n - 4];
+    const pad = 2;
+    const lo: [number, number, number] = [bounds[0] - pad, bounds[1] - pad, bounds[2] - pad];
+    const coarse: [number, number, number] = [
+      bounds[3] + pad - lo[0] + 1, bounds[4] + pad - lo[1] + 1, bounds[5] + pad - lo[2] + 1,
+    ];
+    const reps = 3;
+    const shipped = (): void => {
+      for (let r = 0; r < reps; r++) {
+        extractOrganMesh({ mask, dims, spacing: [1, 1, 1], bounds, blurPasses: 0, smoothIterations: 0 });
+      }
+    };
+    const nested = (): void => {
+      for (let r = 0; r < reps; r++) {
+        const field = cropWithNestedBlockLoops(mask, dims, bounds, lo, coarse, 1);
+        surfaceNets({
+          field: boxBlur3(field, coarse, 0),
+          dims: coarse,
+          spacing: [1, 1, 1],
+          isoValue: 0.5,
+          origin: lo,
+        });
+      }
+    };
+    for (let warm = 0; warm < 4; warm++) {
+      shipped();
+      nested();
+    }
+    const [ours, theirs] = raceBestOf(9, shipped, nested);
+    console.log(`  crop pipeline ${ours.toFixed(1)} ms vs ${theirs.toFixed(1)} ms with nested block loops`);
+    // Measures 0.57-0.60; the two pipelines share everything but the crop.
+    expect(ours / theirs).toBeLessThan(0.8);
+  });
+});
+
+describe('extractOrganMesh input contract', () => {
+  const dims: [number, number, number] = [16, 16, 16];
+
+  it('rejects a mask shorter than its dims instead of meshing past the end', () => {
+    // Reads past the end of a typed array give undefined, and undefined !== 0
+    // is true, so a truncated mask used to come back as solid tissue filling
+    // the missing slices rather than as an error.
+    expect(() =>
+      extractOrganMesh({
+        mask: new Uint8Array(16 * 16 * 8),
+        dims,
+        spacing: [1, 1, 1],
+        bounds: [0, 0, 0, 15, 15, 15],
+      }),
+    ).toThrow(/2048.*4096/);
+  });
+
+  it('never reads a voxel outside the declared bounds', () => {
+    // `bounds` is documented as a superset of the structure, so anything
+    // outside it is background whatever the buffer happens to hold. Callers
+    // share one scratch mask between structures and only clear the box they
+    // are about to fill, which leaves exactly this kind of residue behind.
+    const n = 40;
+    const bounds: [number, number, number, number, number, number] = [14, 14, 14, 24, 24, 24];
+    const clean = boxMask(n, bounds);
+    const withResidue = boxMask(n, bounds);
+    withResidue[(26 * n + 19) * n + 19] = 1;
+
+    const build = (mask: Uint8Array): OrganMesh =>
+      extractOrganMesh({ mask, dims: [n, n, n], spacing: [1, 1, 1], bounds, blurPasses: 3 });
+    const expected = build(clean);
+    const actual = build(withResidue);
+
+    expect(actual.triangleCount).toBe(expected.triangleCount);
+    expect(actual.bounds).toEqual(expected.bounds);
+    expect(Array.from(actual.positions)).toEqual(Array.from(expected.positions));
+  });
+
+  it('closes the mesh where bounds cut through solid mask', () => {
+    // The mirror image of the halo case: bounds tighter than the structure.
+    // Reading outside the box would leave the crop straddling solid material
+    // at its edge, and the surface would run off it (108 boundary edges, and
+    // an enclosed volume a quarter of the truth) with no error raised.
+    const n = 48;
+    const radius = 14;
+    const centre = 24;
+    const mask = sphereMask(n, radius, [centre, centre, centre]);
+    const out = extractOrganMesh({
+      mask,
+      dims: [n, n, n],
+      spacing: [1, 1, 1],
+      bounds: [centre - radius, centre - radius, centre - radius, centre + radius, centre + radius, centre],
+      blurPasses: 3,
+    });
+    const report = checkManifold(out.indices, out.positions.length / 3);
+    expect(report.firstBad).toBeNull();
+    expect(report.unbalancedEdges).toBe(0);
+    // Half a sphere, since the far half was declared out of bounds.
+    const expected = ((4 / 3) * Math.PI * radius ** 3) / 2;
+    const actual = enclosedVolume(out.positions, out.indices);
+    expect(Math.abs(actual - expected) / expected).toBeLessThan(0.05);
+  });
+
+  it('keeps the mesh closed at blur settings far past the default', () => {
+    // The crop pad has to grow with the blur radius. Fixed at two voxels, the
+    // blurred field is still above the isovalue at the array border once the
+    // pass count reaches the low teens (border clamping reflects the solid
+    // region back in), and the surface runs off the edge of the crop: 16
+    // passes gave 288 boundary edges and lost 37% of the volume.
+    const n = 40;
+    const bounds: [number, number, number, number, number, number] = [10, 10, 10, 29, 29, 29];
+    const mask = boxMask(n, bounds);
+    for (const blurPasses of [2, 8, 16, 24]) {
+      const out = extractOrganMesh({
+        mask,
+        dims: [n, n, n],
+        spacing: [1, 1, 1],
+        bounds,
+        blurPasses,
+        smoothIterations: 0,
+      });
+      const label = `blurPasses ${blurPasses}`;
+      const report = checkManifold(out.indices, out.positions.length / 3);
+      expect(report.firstBad, label).toBeNull();
+      expect(report.badEdges, label).toBe(0);
+      // A 20^3 box. Heavy blurring rounds its corners off, which is the point
+      // of blurring, but it must not eat the box.
+      const volume = enclosedVolume(out.positions, out.indices);
+      expect(volume, label).toBeGreaterThan(0.6 * 8000);
+      expect(volume, label).toBeLessThan(8000);
+    }
+  });
+});
+
+describe('structures thinner than the blur', () => {
+  const n = 24;
+  const dims: [number, number, number] = [n, n, n];
+
+  /**
+   * The blur runs before the 0.5 threshold, so a thin structure's peak
+   * occupancy can land below the isovalue and the mesh comes back empty: byte
+   * for byte what an empty mask returns, while the structure still reports a
+   * non-zero volume in the UI. The last column is the pass counts at which
+   * that happened, and three is what the app runs. None of the nine reference
+   * organs is this thin, but the anatomy catalogue lists adrenal glands, ribs
+   * and small vessels.
+   */
+  const cases: ReadonlyArray<
+    readonly [string, [number, number, number, number, number, number], number, number[]]
+  > = [
+    ['3-voxel cube', [11, 11, 11, 13, 13, 13], 27, [2, 3]],
+    ['2-voxel slab', [4, 4, 11, 19, 19, 12], 512, [3]],
+    ['3-voxel tube', [11, 11, 4, 13, 13, 19], 144, [3]],
+  ];
+
+  for (const [name, box, voxels, erasedAt] of cases) {
+    it(`meshes a ${name} that the blur would erase`, () => {
+      const mask = boxMask(n, box);
+      for (const blurPasses of erasedAt) {
+        const label = `${name} at ${blurPasses} passes`;
+        const out = extractOrganMesh({
+          mask,
+          dims,
+          spacing: [1, 1, 1],
+          bounds: box,
+          blurPasses,
+          smoothIterations: 12,
+        });
+        expect(out.triangleCount, label).toBeGreaterThan(0);
+        const report = checkManifold(out.indices, out.positions.length / 3);
+        expect(report.firstBad, label).toBeNull();
+        // Dropping the blur rather than the structure keeps the mesh the size
+        // of the mask; keeping some blur would leave whichever sliver survived
+        // it, which for the cube is 11% of its volume.
+        const volume = enclosedVolume(out.positions, out.indices);
+        expect(volume, label).toBeGreaterThan(0.4 * voxels);
+        expect(volume, label).toBeLessThan(voxels);
+      }
+    });
+  }
+
+  it('still reports nothing for a mask with nothing in it', () => {
+    const out = extractOrganMesh({
+      mask: new Uint8Array(n * n * n),
+      dims,
+      spacing: [1, 1, 1],
+      bounds: [8, 8, 8, 12, 12, 12],
+      blurPasses: 3,
+    });
+    expect(out.triangleCount).toBe(0);
   });
 });
 
@@ -678,5 +1057,161 @@ describe('integration: real liver segmentation', () => {
     }
 
     console.log(`\n  ${rows.join('\n  ')}\n  total extract ${totalMs.toFixed(0)} ms`);
+  }, 120_000);
+
+  it('meshes all nine organs at the settings the app actually ships', async () => {
+    // The module defaults are 2 blur passes and 12 smoothing steps; the mesh
+    // worker asks for 3 and 24, because the masks are segmented slice by slice
+    // and terrace along z at 2.5 mm spacing. Everything above tests the
+    // defaults, so nothing tested the configuration that runs in the browser.
+    const rows: string[] = [];
+    for (const [organ, truthVoxels] of ORGAN_VOXELS) {
+      const { dims, data } = await readNiftiInt8(
+        new URL(`${SEGMENTATIONS}/${organ}.nii.gz`, import.meta.url),
+      );
+      const { voxels, bounds } = maskExtent(data, dims);
+      expect(voxels, organ).toBe(truthVoxels);
+
+      const out = extractOrganMesh({
+        mask: data,
+        dims,
+        spacing: LIVER_SPACING,
+        bounds,
+        blurPasses: 3,
+        smoothIterations: 24,
+      });
+      const report = checkManifold(out.indices, out.positions.length / 3);
+      const voxelMl = (voxels * LIVER_SPACING[0] * LIVER_SPACING[1] * LIVER_SPACING[2]) / 1000;
+      const meshMl = enclosedVolume(out.positions, out.indices) / 1000;
+      const error = (meshMl - voxelMl) / voxelMl;
+
+      rows.push(
+        `${organ.padEnd(13)} T=${String(out.triangleCount).padStart(6)}` +
+          ` bad ${String(report.badEdges).padStart(2)} of ${String(report.edgeCount).padStart(6)} edges` +
+          ` ${meshMl.toFixed(1).padStart(7)} mL (${(error * 100).toFixed(2).padStart(6)} %)`,
+      );
+
+      // Closed and consistently oriented is the property normals and the
+      // divergence-theorem volume depend on, and it holds everywhere.
+      expect(report.unbalancedEdges, organ).toBe(0);
+      // Strict manifoldness does not, quite: the heavier blur puts more detail
+      // at the sample scale, and the liver hits the pinched-cell case
+      // documented in surfaceNets.ts at two of its 340k edges. Pinned so that
+      // a change which makes it common fails here.
+      expect(report.badEdges, organ).toBeLessThanOrEqual(2);
+      // Heavier blurring pulls curved boundaries further in, so the small
+      // organs read lower than they do at the default two passes (-6.6% for
+      // the pancreas against -4.3%).
+      expect(error, organ).toBeLessThan(0);
+      expect(Math.abs(error), organ).toBeLessThan(0.07);
+    }
+    console.log(`\n  ${rows.join('\n  ')}`);
+  }, 120_000);
+
+  it('ignores the neighbours a shared scratch mask leaves in the halo', async () => {
+    // What the mesh worker really passes: one reused buffer, cleared and
+    // filled only inside the box of the structure being built. The pancreas
+    // box has 11518 stomach and 10097 liver voxels within two voxels of it,
+    // which is what the crop pad reaches into, and before the bounds clamp
+    // 26.5% of the pancreas mesh was made of them.
+    const load = async (organ: string): Promise<Uint8Array> =>
+      (await readNiftiInt8(new URL(`${SEGMENTATIONS}/${organ}.nii.gz`, import.meta.url))).data;
+    const { dims } = await readNiftiInt8(
+      new URL(`${SEGMENTATIONS}/pancreas.nii.gz`, import.meta.url),
+    );
+    const pancreas = await load('pancreas');
+    const { bounds } = maskExtent(pancreas, dims);
+    const [i0, j0, k0, i1, j1, k1] = bounds;
+
+    const shared = new Uint8Array(pancreas.length);
+    for (const organ of ['liver', 'stomach']) {
+      const other = await load(organ);
+      for (let v = 0; v < other.length; v++) if (other[v] !== 0) shared[v] = 1;
+    }
+    let halo = 0;
+    for (let k = k0; k <= k1; k++) {
+      for (let j = j0; j <= j1; j++) {
+        const row = (k * dims[1] + j) * dims[0];
+        for (let i = i0; i <= i1; i++) shared[row + i] = pancreas[row + i] !== 0 ? 1 : 0;
+      }
+    }
+    for (let k = Math.max(0, k0 - 2); k <= Math.min(dims[2] - 1, k1 + 2); k++) {
+      for (let j = Math.max(0, j0 - 2); j <= Math.min(dims[1] - 1, j1 + 2); j++) {
+        const row = (k * dims[1] + j) * dims[0];
+        const inRows = j >= j0 && j <= j1 && k >= k0 && k <= k1;
+        for (let i = Math.max(0, i0 - 2); i <= Math.min(dims[0] - 1, i1 + 2); i++) {
+          if (inRows && i >= i0 && i <= i1) continue;
+          if (shared[row + i] !== 0) halo++;
+        }
+      }
+    }
+    expect(halo).toBeGreaterThan(10_000);
+
+    const settings = { dims, spacing: LIVER_SPACING, bounds, blurPasses: 3, smoothIterations: 24 };
+    const alone = extractOrganMesh({ mask: pancreas, ...settings });
+    const reused = extractOrganMesh({ mask: shared, ...settings });
+
+    expect(reused.triangleCount).toBe(alone.triangleCount);
+    expect(reused.bounds).toEqual(alone.bounds);
+    expect(Array.from(reused.positions)).toEqual(Array.from(alone.positions));
+  }, 120_000);
+
+  it('refuses a truncated mask instead of meshing the missing slices as solid', async () => {
+    const { dims, data } = await readNiftiInt8(LIVER_NII);
+    const { bounds } = maskExtent(data, dims);
+    // Eight slices short, as a partial fetch would leave it. The out-of-range
+    // reads counted as inside, and the liver came back at 3899.8 mL, 2.5x its
+    // true volume, filling the missing slices with tissue.
+    const short = data.subarray(0, dims[0] * dims[1] * (dims[2] - 8));
+    expect(() =>
+      extractOrganMesh({ mask: short, dims, spacing: LIVER_SPACING, bounds }),
+    ).toThrow(/mask has \d+ voxels/);
+  }, 120_000);
+
+  it('keeps a decimated preview the size of the organ it previews', async () => {
+    // The synthetic sphere above is a gentle case. Real organs are thin
+    // somewhere, and the blur that a decimated grid inherits erodes them from
+    // that direction: at a fixed three passes the gall bladder read 25% small
+    // at stride 2, 51% at stride 3 and 80% at stride 4, which is not a preview
+    // of anything. Scaling the blur down with the stride is what bounds this.
+    const rows: string[] = [];
+    for (const organ of ['gall_bladder', 'aorta', 'pancreas', 'liver']) {
+      const { dims, data } = await readNiftiInt8(
+        new URL(`${SEGMENTATIONS}/${organ}.nii.gz`, import.meta.url),
+      );
+      const { voxels, bounds } = maskExtent(data, dims);
+      const voxelMl = (voxels * LIVER_SPACING[0] * LIVER_SPACING[1] * LIVER_SPACING[2]) / 1000;
+
+      const full = extractOrganMesh({
+        mask: data, dims, spacing: LIVER_SPACING, bounds, blurPasses: 3, smoothIterations: 24,
+      });
+      const errors: string[] = [];
+      for (const stride of [2, 3, 4]) {
+        const preview = extractOrganMesh({
+          mask: data, dims, spacing: LIVER_SPACING, bounds,
+          decimateStride: stride, blurPasses: 3, smoothIterations: 24,
+        });
+        const label = `${organ} stride ${stride}`;
+        const meshMl = enclosedVolume(preview.positions, preview.indices) / 1000;
+        const error = (meshMl - voxelMl) / voxelMl;
+        errors.push(`s${stride} ${(error * 100).toFixed(1)}%`);
+
+        expect(preview.triangleCount, label).toBeGreaterThan(0);
+        expect(preview.triangleCount, label).toBeLessThan(full.triangleCount / (stride + 1));
+        // A preview only promises closed and consistently oriented; see the
+        // note on pinch cells in surfaceNets.ts.
+        const report = checkManifold(preview.indices, preview.positions.length / 3);
+        expect(report.unbalancedEdges, label).toBe(0);
+        // Worst of these is the gall bladder at stride 4, reading 17% small.
+        expect(Math.abs(error), label).toBeLessThan(0.2);
+        // Same place, not just the same size.
+        for (let a = 0; a < 6; a++) {
+          expect(Math.abs(preview.bounds[a] - full.bounds[a]), `${label} bound ${a}`)
+            .toBeLessThan(4 * stride * LIVER_SPACING[2]);
+        }
+      }
+      rows.push(`${organ.padEnd(13)} ${errors.join('  ')}`);
+    }
+    console.log(`\n  ${rows.join('\n  ')}`);
   }, 120_000);
 });
