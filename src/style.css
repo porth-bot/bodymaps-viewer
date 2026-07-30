@@ -777,7 +777,11 @@ input[type='range']:active::-webkit-slider-thumb {
     border-top: 1px solid var(--border);
     max-height: 42vh;
   }
+}
 
+/* The tagline is the first thing worth losing. It costs 104px, and the toolbar
+   starts overflowing around 985px, so it has to go before the layout does. */
+@media (max-width: 1000px) {
   .brand-text p {
     display: none;
   }

@@ -169,6 +169,11 @@ in vec3 v_uvw;
 out vec4 fragColor;
 
 uniform float u_airCutoff;
+// Redeclared from the vertex stage, which binds the same location, so the
+// outline can step along the plane rather than along a voxel axis.
+uniform vec3 u_pu;
+uniform vec3 u_pv;
+uniform vec3 u_extent;
 
 void main() {
   const float EPS = 1e-4;
@@ -186,7 +191,19 @@ void main() {
   vec3 rgb = vec3(g);
   if (lbl > 0u) {
     vec4 c = lutLookup(lbl);
-    rgb = mix(rgb, c.rgb, c.a * u_labelStyle.x);
+    float alpha = c.a * u_labelStyle.x;
+
+    if (u_labelStyle.y > 0.5) {
+      // Same outline rule as the 2D slices, so switching to outline mode does
+      // not leave the 3D planes filled while every other view is contoured.
+      vec3 du = (u_pu / u_extent) / max(dot(abs(u_pu / u_extent), u_dims), 1.0) * u_labelStyle.z;
+      vec3 dv = (u_pv / u_extent) / max(dot(abs(u_pv / u_extent), u_dims), 1.0) * u_labelStyle.z;
+      bool edge =
+        labelAt(v_uvw + du) != lbl || labelAt(v_uvw - du) != lbl ||
+        labelAt(v_uvw + dv) != lbl || labelAt(v_uvw - dv) != lbl;
+      alpha = edge ? alpha : 0.0;
+    }
+    rgb = mix(rgb, c.rgb, alpha);
   }
   fragColor = vec4(rgb, 1.0);
 }

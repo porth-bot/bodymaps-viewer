@@ -87,6 +87,13 @@ export function slider(opts: {
   return {
     root,
     update(v) {
+      // Widen the track if the value has moved outside it. A range input
+      // silently clamps whatever you assign, so the thumb would sit at the end
+      // reporting a number the app is not using. The window sliders are sized
+      // for CT, and a right-drag or a non-CT volume's auto-window both land
+      // well outside that.
+      if (v < Number(input.min)) input.min = String(v);
+      if (v > Number(input.max)) input.max = String(v);
       if (document.activeElement !== input) input.value = String(v);
       readout.textContent = fmt(v);
     },
