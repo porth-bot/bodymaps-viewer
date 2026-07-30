@@ -119,7 +119,11 @@ export function initialState(): AppState {
 
     showMeshes: true,
     meshOpacity: 1,
-    showSlicesIn3D: true,
+    // Off by default, as in 3D Slicer. At the opening camera angle the axial
+    // plane is nearly edge-on, so it contributes almost nothing visually while
+    // occluding a wide band of the volume behind it. Press P or use the 3D
+    // panel to bring the planes back.
+    showSlicesIn3D: false,
     showBoundingBox: false,
 
     tool: 'navigate',
