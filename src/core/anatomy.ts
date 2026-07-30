@@ -25,8 +25,8 @@
  *      `contralateral`).
  *   2. A whole tissue class is often one colour. All twelve thoracic vertebrae
  *      are 226,202,134; the myocardium and all four cardiac chambers sit inside
- *      dE 5 of each other. Members of a series alternate a small lightness step
- *      and crowded groups are spread into a ladder.
+ *      dE 5 of each other. Members of a series are spread along a ramp (see
+ *      `seriesShade`) and crowded groups are given an explicit ladder.
  *   3. The abdominal viscera are all one warm salmon family. Slicer's liver
  *      (221,130,101) and stomach (216,132,105) are CIE76 dE 3.7 apart, roughly
  *      one and a half just-noticeable differences, and the kidneys sit inside
@@ -39,10 +39,13 @@
  * so no departure of ours is the limiting factor there.
  *
  * Separation is scoped to structures that can share a slice. Across the whole
- * 130-entry table the closest pair is dE 3.4 (clavicle against hip bone), which
- * is deliberate: chasing global separation pushes bone off ivory and muscle off
- * red, and a reader notices a lime-green rib far faster than two similar tans
- * that never appear together.
+ * 132-entry table the closest pair is dE 3.2 (two rungs of the same rib ramp),
+ * and the closest pair from two different structures is dE 3.4 (clavicle
+ * against hip bone). That floor is deliberate: chasing global separation pushes
+ * bone off ivory and muscle off red, and a reader notices a lime-green rib far
+ * faster than two similar tans that never appear together. `tests/anatomy.test.ts`
+ * pins both numbers, so a retune that lowers them fails the suite rather than
+ * making this paragraph quietly wrong.
  */
 
 export interface AnatomyEntry {
@@ -76,12 +79,8 @@ function contralateral(c: RGB): RGB {
   ];
 }
 
-function scale(c: RGB, f: number): RGB {
-  return [
-    Math.min(255, Math.round(c[0] * f)),
-    Math.min(255, Math.round(c[1] * f)),
-    Math.min(255, Math.round(c[2] * f)),
-  ];
+function clampByte(v: number): number {
+  return Math.max(0, Math.min(255, Math.round(v)));
 }
 
 /** Emit `<stem>_left` / `<stem>_right`, deriving the right colour if not given. */
@@ -94,10 +93,46 @@ function pair(stem: string, name: string, left: RGB, right?: RGB): Def[] {
 
 // --- vertebrae and ribs ----------------------------------------------------
 // These are long uniform series in the LUT: every cervical vertebra is one
-// ivory, every rib another. Members of a series alternate a small lightness
-// step so two neighbours never merge into a single band on a sagittal slice.
+// ivory, every rib another. A sagittal slice shows a whole series at once, so
+// each member gets its own rung of a ramp rather than one of two alternating
+// shades, which would put six identical vertebrae on screen together.
 
-const SERIES_ALTERNATE = 0.88;
+/**
+ * How far the last rung of a series drops below the LUT colour, and how far the
+ * warm/cool tilt swings across the ramp. Twelve rungs separated by lightness
+ * alone would need a drop of about half, running the last ribs down into a
+ * brown that reads as a hole in the overlay rather than a label, so the ramp
+ * moves along two axes at once and neither has to travel far.
+ */
+const SERIES_LIGHTNESS_SPAN = 0.26;
+const SERIES_WARMTH_SPAN = 0.34;
+
+/** Colour for member `n` (0-based) of a `count`-long series. */
+function seriesShade(base: RGB, n: number, count: number): RGB {
+  if (count < 2) return base;
+  const p = rampPosition(n, count) / (count - 1);
+  const lightness = 1 - SERIES_LIGHTNESS_SPAN * p;
+  // The tilt rides on blue alone: pushing red or green instead would clip
+  // against 255 on the near-white cervical ivory and flatten the bright half of
+  // the ramp back into duplicates.
+  const warmth = 1 + SERIES_WARMTH_SPAN * (p - 0.5);
+  return [
+    clampByte(base[0] * lightness),
+    clampByte(base[1] * lightness),
+    clampByte(base[2] * lightness * warmth),
+  ];
+}
+
+/**
+ * Which rung member `n` occupies. The ramp is walked in two passes, even
+ * members then odd ones, so T7 and T8 land half a ramp apart while every member
+ * still gets a rung to itself. Walking it in order would instead put the
+ * smallest step exactly where it matters most, between two vertebrae that touch.
+ */
+function rampPosition(n: number, count: number): number {
+  const half = Math.ceil(count / 2);
+  return n % 2 === 0 ? n / 2 : half + (n - 1) / 2;
+}
 
 const VERTEBRA_REGIONS: ReadonlyArray<readonly [prefix: string, count: number, color: RGB]> = [
   ['C', 7, [255, 255, 207]], // Slicer cervical_vertebral_column
@@ -110,7 +145,7 @@ function vertebraDefs(): Def[] {
   const out: Def[] = [];
   for (const [prefix, count, color] of VERTEBRA_REGIONS) {
     for (let n = 1; n <= count; n++) {
-      const shade = n % 2 === 1 ? color : scale(color, SERIES_ALTERNATE);
+      const shade = seriesShade(color, n - 1, count);
       out.push([`vertebrae_${prefix}${n}`, `Vertebra ${prefix}${n}`, shade]);
     }
   }
@@ -121,6 +156,8 @@ function vertebraDefs(): Def[] {
 // nor its alternating shade lands on the thoracic vertebrae it sits beside.
 const RIB_COLOR: RGB = [252, 222, 176];
 
+const RIBS_PER_SIDE = 12;
+
 function ribDefs(): Def[] {
   const out: Def[] = [];
   const sides: ReadonlyArray<readonly [side: 'left' | 'right', color: RGB]> = [
@@ -128,8 +165,8 @@ function ribDefs(): Def[] {
     ['right', contralateral(RIB_COLOR)],
   ];
   for (const [side, base] of sides) {
-    for (let n = 1; n <= 12; n++) {
-      const shade = n % 2 === 1 ? base : scale(base, SERIES_ALTERNATE);
+    for (let n = 1; n <= RIBS_PER_SIDE; n++) {
+      const shade = seriesShade(base, n - 1, RIBS_PER_SIDE);
       out.push([`rib_${side}_${n}`, `Rib ${n} (${side})`, shade]);
     }
   }
@@ -260,11 +297,22 @@ const DEFS: readonly Def[] = [
 ];
 
 /**
+ * Every lookup table below is null-prototyped. The keys come from file names a
+ * user dropped on the page, and on a plain object a mask called "constructor"
+ * would resolve through Object.prototype and hand back a function where an
+ * entry is expected. `normalise` lowercases, so "constructor" is the only
+ * inherited member that can survive it, but one is enough to abort a load.
+ */
+function emptyTable<T>(): Record<string, T> {
+  return Object.create(null) as Record<string, T>;
+}
+
+/**
  * Alternative spellings seen in the wild, mapped to the canonical key. Keys and
  * values are both in normalised form. Left/right word order is handled
  * separately in `lookupAnatomy` so this table does not need a row per side.
  */
-const ALIASES: Readonly<Record<string, string>> = {
+const ALIASES: Readonly<Record<string, string>> = Object.assign(emptyTable<string>(), {
   gallbladder: 'gall_bladder',
   inferior_vena_cava: 'postcava',
   vena_cava_inferior: 'postcava',
@@ -308,10 +356,10 @@ const ALIASES: Readonly<Record<string, string>> = {
   hip_bone: 'hip',
   cyst_kidney: 'kidney_cyst',
   renal_cyst: 'kidney_cyst',
-};
+});
 
 function buildAnatomy(): Record<string, AnatomyEntry> {
-  const table: Record<string, AnatomyEntry> = {};
+  const table = emptyTable<AnatomyEntry>();
   for (const [key, name, color] of DEFS) {
     if (table[key]) throw new Error(`anatomy: duplicate key ${key}`);
     table[key] = Object.freeze({ key, name, color: Object.freeze(color) as RGB });
@@ -326,15 +374,15 @@ const FILE_SUFFIXES = ['_nii_gz', '_nii', '_gz', '_mask', '_seg', '_label'];
 
 /** Canonical keys indexed by their normalised form, e.g. vertebrae_l3 -> vertebrae_L3. */
 const BY_NORMALISED: Readonly<Record<string, string>> = (() => {
-  const index: Record<string, string> = {};
+  const index = emptyTable<string>();
   for (const key of Object.keys(ANATOMY)) index[normalise(key)] = key;
   return index;
 })();
 
 /**
  * Collapse a mask name to a comparison key: lower case, every run of
- * non-alphanumerics becomes one underscore, and any file-extension tail left
- * over from a filename is dropped. "Kidney Left", "kidney-left" and
+ * non-alphanumerics becomes one underscore, and any file-extension or
+ * segmentation-qualifier tail is dropped. "Kidney Left", "kidney-left" and
  * "KIDNEY_LEFT.nii.gz" all land on "kidney_left".
  */
 function normalise(raw: string): string {
@@ -342,10 +390,19 @@ function normalise(raw: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '');
-  for (const suffix of FILE_SUFFIXES) {
-    if (s.length > suffix.length && s.endsWith(suffix)) {
-      s = s.slice(0, -suffix.length);
-      break;
+  // Stripping runs to a fixed point because a real export carries an extension
+  // and a qualifier at once ("liver_mask.nii.gz"), and taking only the outer
+  // one leaves a name no table can match. Each pass shortens `s` by at least
+  // three characters and never empties it, so this terminates.
+  let stripped = true;
+  while (stripped) {
+    stripped = false;
+    for (const suffix of FILE_SUFFIXES) {
+      if (s.length > suffix.length && s.endsWith(suffix)) {
+        s = s.slice(0, -suffix.length);
+        stripped = true;
+        break;
+      }
     }
   }
   return s;

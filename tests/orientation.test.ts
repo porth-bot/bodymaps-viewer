@@ -255,6 +255,21 @@ describe('reorientToRAS', () => {
     expect(volume.min).toBe(-3);
     expect(volume.max).toBe(7);
   });
+
+  it('skips infinite voxels too, which comparison alone would keep', () => {
+    // Derived float maps carry these. An infinity reaching min/max flattens the
+    // window/level autoscaling that reads them.
+    const data = Float32Array.from([1, 2, Infinity, -Infinity, 3, 4, NaN, 5]);
+    const volume = reorientToRAS(makeImage([2, 2, 2], affineFor(['R', 'A', 'S']), data));
+    expect(volume.min).toBe(1);
+    expect(volume.max).toBe(5);
+  });
+
+  it('reports a zero range for an all-NaN volume', () => {
+    const data = Float32Array.from([NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN]);
+    const volume = reorientToRAS(makeImage([2, 2, 2], affineFor(['R', 'A', 'S']), data));
+    expect([volume.min, volume.max]).toEqual([0, 0]);
+  });
 });
 
 // --- reorientLike ----------------------------------------------------------
@@ -290,6 +305,25 @@ describe('reorientLike', () => {
     const shifted = affineFor(['L', 'P', 'S'], [1, 2, 3], [10, 20, 31]);
     const image = makeImage(dims, shifted, indexPattern(dims));
     expect(() => reorientLike(image, reference)).toThrow(/mask affine differs from the reference/);
+  });
+
+  it('rejects a mask affine that cannot be compared to the reference', () => {
+    // A worst-difference accumulator never sees a NaN difference, so the one
+    // affine that should be rejected hardest (a mask whose world placement is
+    // unknown) would otherwise pass as an exact match and be drawn anyway.
+    const broken = Float64Array.from(affine);
+    broken[3] = NaN;
+    expect(() => reorientLike(makeImage(dims, broken, indexPattern(dims)), reference)).toThrow(
+      /cannot be compared/,
+    );
+  });
+
+  it('rejects a mask affine with an infinite origin', () => {
+    const broken = Float64Array.from(affine);
+    broken[7] = Infinity;
+    expect(() => reorientLike(makeImage(dims, broken, indexPattern(dims)), reference)).toThrow(
+      /Grid mismatch/,
+    );
   });
 
   it('tolerates sub-micron affine noise', () => {

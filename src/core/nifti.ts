@@ -310,14 +310,14 @@ function isUsableAffine(m: Mat4): boolean {
   for (let i = 0; i < 12; i++) {
     if (!Number.isFinite(m[i])) return false;
   }
-  const scale =
+  const columnScale =
     Math.hypot(m[0], m[4], m[8]) * Math.hypot(m[1], m[5], m[9]) * Math.hypot(m[2], m[6], m[10]);
-  if (!(scale > 0)) return false;
+  if (!(columnScale > 0)) return false;
   const det =
     m[0] * (m[5] * m[10] - m[6] * m[9]) -
     m[1] * (m[4] * m[10] - m[6] * m[8]) +
     m[2] * (m[4] * m[9] - m[5] * m[8]);
-  return Math.abs(det) / scale > MIN_RELATIVE_DETERMINANT;
+  return Math.abs(det) / columnScale > MIN_RELATIVE_DETERMINANT;
 }
 
 /** Millimetres per file unit, from the low 3 bits of xyzt_units. */
@@ -444,7 +444,8 @@ function spatialDims(header: NiftiHeader): [number, number, number] {
   const declaredRank = header.dim[0];
   // A rank outside the spec's 1..7 is itself corrupt; treating it as 3 means
   // all three sizes are then required rather than quietly defaulted.
-  const rank = Number.isInteger(declaredRank) && declaredRank >= 1 && declaredRank <= 7 ? declaredRank : 3;
+  const rankIsSane = Number.isInteger(declaredRank) && declaredRank >= 1 && declaredRank <= 7;
+  const rank = rankIsSane ? declaredRank : 3;
 
   const sizes: [number, number, number] = [1, 1, 1];
   for (let axis = 0; axis < 3; axis++) {

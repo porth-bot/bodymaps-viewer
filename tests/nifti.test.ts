@@ -121,8 +121,49 @@ function synthNifti1(spec: Nifti1Spec): ArrayBuffer {
   return buffer;
 }
 
+/**
+ * A NIfTI-1 with the same header layout but a zeroed voxel block, for volumes
+ * too large to build a value at a time. Callers fill it through a typed view.
+ */
+function synthNifti1Blank(dims: [number, number, number], datatype: NiftiDataType): ArrayBuffer {
+  const writer = ELEMENT_WRITERS[datatype];
+  if (!writer) throw new Error(`test synthesiser has no writer for datatype ${datatype}`);
+  const header = synthNifti1({ dims, datatype, values: [] });
+  const buffer = new ArrayBuffer(352 + dims[0] * dims[1] * dims[2] * writer.bytes);
+  new Uint8Array(buffer).set(new Uint8Array(header));
+  return buffer;
+}
+
 function ramp(count: number, start = 0): number[] {
   return Array.from({ length: count }, (_, i) => i + start);
+}
+
+function concatBytes(...parts: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((total, p) => total + p.length, 0));
+  let offset = 0;
+  for (const p of parts) {
+    out.set(p, offset);
+    offset += p.length;
+  }
+  return out;
+}
+
+/** Run `body` with the native gzip decoder hidden, i.e. on the fflate path. */
+async function withoutDecompressionStream<T>(body: () => Promise<T>): Promise<T> {
+  const native = globalThis.DecompressionStream;
+  // @ts-expect-error deliberately removing a global to exercise the fallback
+  delete globalThis.DecompressionStream;
+  try {
+    return await body();
+  } finally {
+    globalThis.DecompressionStream = native;
+  }
+}
+
+function elapsedMs(body: () => void): number {
+  const started = performance.now();
+  body();
+  return performance.now() - started;
 }
 
 /**
@@ -406,6 +447,133 @@ describe('affine selection', () => {
     expect(header.affine[3]).toBe(10);
   });
 
+  it('ignores an sform whose columns are linearly dependent', () => {
+    // Third column is 0.1*first + 0.3*second, so the matrix has rank 2 while
+    // every entry is a healthy magnitude. Rounding the entries to the float32
+    // the header stores leaves a determinant of 6e-10, which an absolute
+    // threshold waves through; relative to the column norms it is 3e-9.
+    const header = parseNiftiHeader(
+      synthNifti1({
+        dims,
+        datatype: NiftiDataType.UINT8,
+        values,
+        pixdim: [2, 3, 4],
+        sformCode: 1,
+        srow: [
+          0.81641, 0.02, 0.087641, -10,
+          0.1, 0.81641, 0.254923, -20,
+          0.05, 0.3, 0.095, -30,
+        ],
+        qformCode: 1,
+        quatern: [0, 0, 0],
+        qoffset: [10, 20, 30],
+      }),
+    );
+    expect(header.affineSource).toBe('qform');
+  });
+
+  it('keeps an sform whose determinant is small only because the voxels are', () => {
+    // A 4 nm LPS grid. The determinant is 6.4e-17 but the matrix is perfectly
+    // conditioned, and rejecting it loses the L/P flips and the origin, i.e.
+    // the volume is presented mirrored with no error anywhere.
+    const header = parseNiftiHeader(
+      synthNifti1({
+        dims,
+        datatype: NiftiDataType.UINT8,
+        values,
+        pixdim: [4e-6, 4e-6, 4e-6],
+        sformCode: 1,
+        srow: [-4e-6, 0, 0, 1e-3, 0, -4e-6, 0, 2e-3, 0, 0, 4e-6, 3e-3],
+      }),
+    );
+    expect(header.affineSource).toBe('sform');
+    expect(header.affine[0]).toBeLessThan(0);
+    expect(header.affine[5]).toBeLessThan(0);
+    expect(header.affine[10]).toBeGreaterThan(0);
+    expect(header.affine[3]).toBeCloseTo(1e-3, 9);
+    expect(header.affine[7]).toBeCloseTo(2e-3, 9);
+    expect(header.affine[11]).toBeCloseTo(3e-3, 9);
+  });
+
+  it('does not let xyzt_units decide whether an sform is usable', () => {
+    // The same 0.1 mm isotropic grid, written once in metres and once in
+    // millimetres. Conditioning is a property of the geometry, not of the unit
+    // the file happens to name.
+    const inMetres = parseNiftiHeader(
+      synthNifti1({
+        dims,
+        datatype: NiftiDataType.UINT8,
+        values,
+        pixdim: [1e-4, 1e-4, 1e-4],
+        sformCode: 1,
+        srow: [1e-4, 0, 0, -1e-2, 0, 1e-4, 0, -2e-2, 0, 0, 1e-4, -3e-2],
+        xyztUnits: 1,
+      }),
+    );
+    const inMillimetres = parseNiftiHeader(
+      synthNifti1({
+        dims,
+        datatype: NiftiDataType.UINT8,
+        values,
+        pixdim: [0.1, 0.1, 0.1],
+        sformCode: 1,
+        srow: [0.1, 0, 0, -10, 0, 0.1, 0, -20, 0, 0, 0.1, -30],
+        xyztUnits: 2,
+      }),
+    );
+    expect(inMetres.affineSource).toBe('sform');
+    expect(inMillimetres.affineSource).toBe('sform');
+    for (let i = 0; i < 16; i++) {
+      expect(inMetres.affine[i], `affine[${i}]`).toBeCloseTo(inMillimetres.affine[i], 4);
+    }
+  });
+
+  it('falls back to the qform when the sform origin is not finite', () => {
+    // A partially written header gives NaN, not zeros. The 3x3 block looks
+    // healthy, so a determinant test alone accepts it and every world
+    // coordinate downstream silently becomes NaN.
+    for (const bad of [NaN, Infinity, -Infinity]) {
+      const header = parseNiftiHeader(
+        synthNifti1({
+          dims,
+          datatype: NiftiDataType.UINT8,
+          values,
+          pixdim: [2, 3, 4],
+          sformCode: 1,
+          srow: [2, 0, 0, bad, 0, 3, 0, -20, 0, 0, 4, -30],
+          qformCode: 1,
+          quatern: [0, 0, 0],
+          qoffset: [-11, -22, -33],
+        }),
+      );
+      expect(header.affineSource, String(bad)).toBe('qform');
+      expect(Array.from(header.affine), String(bad)).toEqual([
+        2, 0, 0, -11,
+        0, 3, 0, -22,
+        0, 0, 4, -33,
+        0, 0, 0, 1,
+      ]);
+    }
+  });
+
+  it('falls back to pixdim when neither form has a finite origin', () => {
+    const header = parseNiftiHeader(
+      synthNifti1({
+        dims,
+        datatype: NiftiDataType.UINT8,
+        values,
+        pixdim: [2, 3, 4],
+        sformCode: 1,
+        srow: [2, 0, 0, NaN, 0, 3, 0, -20, 0, 0, 4, -30],
+        qformCode: 1,
+        quatern: [0, 0, 0],
+        qoffset: [NaN, -22, -33],
+      }),
+    );
+    expect(header.affineSource).toBe('pixdim');
+    expect(Array.from(header.affine).every((v) => Number.isFinite(v))).toBe(true);
+  });
+
   it('falls back to pixdim scaling when neither form is set', () => {
     const header = parseNiftiHeader(
       synthNifti1({ dims, datatype: NiftiDataType.UINT8, values, pixdim: [2, 3, 4] }),
@@ -509,6 +677,49 @@ describe('header text and layout', () => {
     expect(parseNifti(buffer).data.buffer).toBe(buffer);
   });
 
+  it('rejects a vox_offset that points inside the header', () => {
+    // 348 is sizeof_hdr and 352 is the first data byte, so 348 is the classic
+    // writer off-by-four. It leaves plenty of bytes behind it, which is why the
+    // past-the-end check cannot catch it: the volume just comes out shifted by
+    // two samples and still renders and still probes HU.
+    for (const offset of [348, 100]) {
+      const buffer = synthNifti1({
+        dims: [4, 1, 1],
+        datatype: NiftiDataType.INT16,
+        values: [1000, 2000, 3000, 4000],
+      });
+      new DataView(buffer).setFloat32(108, offset, true);
+      expect(() => parseNifti(buffer), String(offset)).toThrow(
+        /voxels cannot start before byte 352/,
+      );
+    }
+  });
+
+  it('rejects a declared dimension of zero rather than reading it as one', () => {
+    for (const bad of [0, -3]) {
+      const buffer = synthNifti1({
+        dims: [1, 2, 2],
+        datatype: NiftiDataType.INT16,
+        values: [10, 20, 30, 40],
+      });
+      new DataView(buffer).setInt16(42, bad, true); // dim[1], with dim[0] still 3
+      expect(() => parseNifti(buffer), String(bad)).toThrow(
+        new RegExp(`Invalid NIfTI dimension along i: ${bad}`),
+      );
+    }
+  });
+
+  it('still accepts a 2D image that leaves dim[3] unset', () => {
+    const buffer = synthNifti1({ dims: [4, 5, 1], datatype: NiftiDataType.INT16, values: ramp(20) });
+    const view = new DataView(buffer);
+    view.setInt16(40, 2, true); // dim[0] = 2, so dim[3] is not a real axis
+    view.setInt16(46, 0, true);
+
+    const image = parseNifti(buffer);
+    expect(image.header.dim.slice(0, 4)).toEqual([2, 4, 5, 0]);
+    expect(Array.from(image.data)).toEqual(ramp(20));
+  });
+
   it('reads a header without needing the voxels', () => {
     const full = synthNifti1({
       dims: [4, 4, 4],
@@ -590,21 +801,112 @@ describe('gunzipIfNeeded', () => {
   });
 
   it('falls back to fflate when DecompressionStream is missing', async () => {
-    const native = globalThis.DecompressionStream;
-    // @ts-expect-error deliberately removing a global to exercise the fallback
-    delete globalThis.DecompressionStream;
-    try {
-      const gz = toArrayBuffer(gzipSync(new Uint8Array(plain)));
-      const out = await gunzipIfNeeded(gz);
-      expect(new Uint8Array(out)).toEqual(new Uint8Array(plain));
-    } finally {
-      globalThis.DecompressionStream = native;
+    const out = await withoutDecompressionStream(() =>
+      gunzipIfNeeded(toArrayBuffer(gzipSync(new Uint8Array(plain)))),
+    );
+    expect(new Uint8Array(out)).toEqual(new Uint8Array(plain));
+  });
+
+  /** The same buffer through the native decoder first and through fflate only. */
+  async function bothPaths(gz: Uint8Array): Promise<Array<[string, ArrayBuffer]>> {
+    return [
+      ['native first', await gunzipIfNeeded(toArrayBuffer(gz))],
+      ['fflate only', await withoutDecompressionStream(() => gunzipIfNeeded(toArrayBuffer(gz)))],
+    ];
+  }
+
+  it('decompresses a member padded with trailing NUL bytes', async () => {
+    // Writers that pad to a block boundary produce these. DecompressionStream
+    // rejects the padding outright, and fflate's one-shot gunzipSync reads it
+    // as the ISIZE footer and sizes the output at zero bytes, which surfaces
+    // downstream as "not a NIfTI file" rather than as a decompression failure.
+    const padded = concatBytes(gzipSync(new Uint8Array(plain)), new Uint8Array(16));
+    for (const [label, out] of await bothPaths(padded)) {
+      expect(new Uint8Array(out), label).toEqual(new Uint8Array(plain));
+    }
+  });
+
+  it('decompresses every member of a concatenated gzip', async () => {
+    const bytes = new Uint8Array(plain);
+    const mid = bytes.length >> 1;
+    const multi = concatBytes(gzipSync(bytes.subarray(0, mid)), gzipSync(bytes.subarray(mid)));
+    for (const [label, out] of await bothPaths(multi)) {
+      expect(new Uint8Array(out), label).toEqual(bytes);
+    }
+    // The prefix a first-member-only decode returns is clean, so nothing looks
+    // wrong until the voxel block turns up short.
+    expect(Array.from(parseNifti(await gunzipIfNeeded(toArrayBuffer(multi))).data)).toEqual(
+      ramp(24, -5),
+    );
+  });
+
+  it('reports a truncated gzip rather than returning a clean prefix', async () => {
+    const gz = gzipSync(new Uint8Array(plain));
+    for (const cut of [20, 200]) {
+      const truncated = gz.subarray(0, gz.length - cut);
+      await expect(
+        withoutDecompressionStream(() => gunzipIfNeeded(toArrayBuffer(truncated))),
+        String(cut),
+      ).rejects.toThrow();
     }
   });
 
   it('handles a buffer too short to hold a magic number', async () => {
     const tiny = new ArrayBuffer(1);
     expect(await gunzipIfNeeded(tiny)).toBe(tiny);
+  });
+});
+
+describe('64-bit integer widening', () => {
+  // Big enough that the conversion dominates the ~1 ms the rest of parseNifti
+  // costs, small enough to keep the suite quick.
+  const dims: [number, number, number] = [200, 100, 100];
+  const count = dims[0] * dims[1] * dims[2];
+
+  function makeInt64Volume(): ArrayBuffer {
+    const buffer = synthNifti1Blank(dims, NiftiDataType.INT64);
+    const raw = new BigInt64Array(buffer, 352, count);
+    raw.fill(7n);
+    raw[0] = -5n;
+    raw[1] = 9007199254740991n;
+    raw[count - 1] = -9007199254740991n;
+    return buffer;
+  }
+
+  it('widens without the 8x cost of Float64Array.from', () => {
+    const buffer = makeInt64Volume();
+    const viaFrom = (): Float64Array =>
+      Float64Array.from(new BigInt64Array(buffer, 352, count), Number);
+
+    // Both paths are warmed first, then timed best-of-three, because the
+    // measurement is a ratio between two implementations rather than a budget:
+    // `Float64Array.from` with a map function allocates a second heap bigint
+    // per element, an indexed loop into a preallocated array does not.
+    viaFrom();
+    parseNifti(buffer);
+    let fromMs = Infinity;
+    let parseMs = Infinity;
+    for (let run = 0; run < 3; run++) {
+      fromMs = Math.min(fromMs, elapsedMs(() => void viaFrom()));
+      parseMs = Math.min(parseMs, elapsedMs(() => void parseNifti(buffer)));
+    }
+    expect(parseMs).toBeLessThan(fromMs * 0.5);
+  });
+
+  it('produces exactly what the generic conversion would', () => {
+    const buffer = makeInt64Volume();
+    const image = parseNifti(buffer);
+    expect(image.data).toBeInstanceOf(Float64Array);
+    expect(image.data.length).toBe(count);
+    expect(Array.from(image.data.subarray(0, 3))).toEqual([-5, 9007199254740991, 7]);
+    expect(image.data[count - 1]).toBe(-9007199254740991);
+
+    // Compared by hand rather than with toEqual, which deep-compares 2M
+    // elements and takes two seconds to say the same thing.
+    const generic = Float64Array.from(new BigInt64Array(buffer, 352, count), Number);
+    let mismatches = 0;
+    for (let i = 0; i < count; i++) if (image.data[i] !== generic[i]) mismatches++;
+    expect(mismatches).toBe(0);
   });
 });
 

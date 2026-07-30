@@ -11,7 +11,7 @@
 
 import { gunzipIfNeeded, parseNifti } from '../core/nifti';
 import { reorientLike, reorientToRAS } from '../core/orientation';
-import { buildLabelVolume, type MaskInput } from '../core/labelmap';
+import { buildLabelVolume, expandMaskFile, type MaskInput } from '../core/labelmap';
 import { normalizeForGpu } from '../core/volume';
 import type { LabelVolume, Volume } from '../core/types';
 
@@ -108,7 +108,17 @@ ctx.onmessage = async (event: MessageEvent<LoadRequest>) => {
       });
       const plain = await gunzipIfNeeded(buf);
       const image = parseNifti(plain);
-      masks.push({ key, values: reorientLike(image, volume) });
+      // One file can describe one structure or many. TotalSegmentator's default
+      // output is a single combined map holding values 1..N, and AbdomenAtlas
+      // ships both layouts, so which one this is has to be decided from the
+      // data rather than from the filename.
+      masks.push(...expandMaskFile(key, reorientLike(image, volume), undefined));
+      if (masks.length > 255) {
+        throw new Error(
+          `This case describes more than 255 structures, which is more than a ` +
+          `single-byte label volume can hold.`,
+        );
+      }
     }
 
     post({ type: 'progress', token, stage: 'Packing structures', fraction: 0.97 });

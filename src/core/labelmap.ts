@@ -13,8 +13,62 @@ import { lookupAnatomy } from './anatomy';
 export interface MaskInput {
   /** Machine name, e.g. "kidney_left". Used to look up colour and display name. */
   key: string;
-  /** Already reoriented to the reference volume's RAS grid. Non-zero means inside. */
+  /** Already reoriented to the reference volume's RAS grid. */
   values: TypedNumberArray;
+  /**
+   * Which value counts as inside. Undefined means any non-zero value, which is
+   * the binary-mask case.
+   *
+   * A combined multi-label file (one volume holding values 1..N, which is what
+   * TotalSegmentator emits by default) becomes N MaskInputs that all share the
+   * same `values` array and differ only here. Splitting it into N real arrays
+   * instead would cost 12 MB each, so a 117-structure TotalSegmentator output
+   * would need well over a gigabyte to say the same thing.
+   */
+  matchValue?: number;
+}
+
+/**
+ * Distinct non-zero values in a volume, for deciding whether a file is a binary
+ * mask or a combined multi-label map.
+ *
+ * Stops early once the count exceeds `limit`, because a continuous-valued
+ * volume handed in by mistake would otherwise build a set with millions of
+ * entries before anyone found out it was not a segmentation.
+ */
+export function distinctLabels(values: TypedNumberArray, limit = 255): number[] {
+  const seen = new Set<number>();
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i];
+    if (v === 0) continue;
+    if (!Number.isInteger(v)) return [];
+    seen.add(v);
+    if (seen.size > limit) return [];
+  }
+  return [...seen].sort((a, b) => a - b);
+}
+
+/**
+ * Expand one parsed file into the structures it describes.
+ *
+ * A file with a single non-zero value is a binary mask named after the file. A
+ * file with several is a combined label map, and each value becomes its own
+ * structure. Names come from the caller's table when it has one, and otherwise
+ * from the value itself, so an unrecognised label map still lists and toggles
+ * per structure rather than collapsing into one blob.
+ */
+export function expandMaskFile(
+  key: string,
+  values: TypedNumberArray,
+  labelNames?: Record<number, string>,
+): MaskInput[] {
+  const labels = distinctLabels(values);
+  if (labels.length <= 1) return [{ key, values }];
+  return labels.map((value) => ({
+    key: labelNames?.[value] ?? `label_${value}`,
+    values,
+    matchValue: value,
+  }));
 }
 
 export interface BuildLabelOptions {
@@ -59,12 +113,17 @@ export function buildLabelVolume({ reference, masks }: BuildLabelOptions): Label
     let ci = 0, cj = 0, ck = 0;
 
     const v = mask.values;
+    const target = mask.matchValue;
+    const inside = target === undefined
+      ? (x: number) => x !== 0
+      : (x: number) => x === target;
+
     for (let k = 0; k < nz; k++) {
       const kOff = k * nx * ny;
       for (let j = 0; j < ny; j++) {
         const jOff = kOff + j * nx;
         for (let i2 = 0; i2 < nx; i2++) {
-          if (v[jOff + i2] === 0) continue;
+          if (!inside(v[jOff + i2])) continue;
           count++;
           sum += scalar[jOff + i2] * slope + intercept;
           ci += i2; cj += j; ck += k;
@@ -111,6 +170,7 @@ export function buildLabelVolume({ reference, masks }: BuildLabelOptions): Label
     if (s.count === 0) continue;
     const v = s.mask.values;
     const label = s.structure.index;
+    const target = s.mask.matchValue;
     // Paint inside the bounding box only. Structures are small relative to the
     // scan (the nine here fill 1.5 of 12.4 million voxels), so scanning the
     // whole array once per structure is most of the work in this function for
@@ -122,7 +182,8 @@ export function buildLabelVolume({ reference, masks }: BuildLabelOptions): Label
         const row = kOff + j * nx;
         for (let i = bi0; i <= bi1; i++) {
           const idx = row + i;
-          if (v[idx] === 0) continue;
+          const raw = v[idx];
+          if (target === undefined ? raw === 0 : raw !== target) continue;
           if (values[idx] !== 0) overlapVoxels++;
           values[idx] = label;
         }

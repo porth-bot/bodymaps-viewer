@@ -247,7 +247,14 @@ http://www.cs.jhu.edu/~zongwei/dataset/BDMAP_00000338.zip
 
 It is a contrast-enhanced abdominal CT with nine annotated structures, in the
 AbdomenAtlas layout of one `ct.nii.gz` plus one binary mask per structure under
-`segmentations/`. The viewer also reads combined multi-label files.
+`segmentations/`.
+
+Combined multi-label files also work, which is what TotalSegmentator emits by
+default: a file holding several distinct values is split into one structure per
+value rather than collapsed into a single blob. Each shares the underlying
+array and is distinguished by a `matchValue`, so a 117-structure output costs
+one 12 MB array rather than 117 of them. Values map to `label_1`, `label_2` and
+so on, since no naming convention is carried in the file itself.
 
 Structure colours and display names follow the TotalSegmentator and 3D Slicer
 conventions where a standard exists.
