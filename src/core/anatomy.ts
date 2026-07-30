@@ -39,13 +39,15 @@
  * so no departure of ours is the limiting factor there.
  *
  * Separation is scoped to structures that can share a slice. Across the whole
- * 132-entry table the closest pair is dE 3.2 (two rungs of the same rib ramp),
- * and the closest pair from two different structures is dE 3.4 (clavicle
- * against hip bone). That floor is deliberate: chasing global separation pushes
- * bone off ivory and muscle off red, and a reader notices a lime-green rib far
- * faster than two similar tans that never appear together. `tests/anatomy.test.ts`
- * pins both numbers, so a retune that lowers them fails the suite rather than
- * making this paragraph quietly wrong.
+ * 132-entry table the closest pair is dE 2.8, ribs 1 and 3 of the right side,
+ * two rungs of one ramp with rib 2 between them; the closest pair naming two
+ * different structures is dE 3.1 (T12 against a right rib) and the closest pair
+ * outside the series ramps is dE 3.4 (clavicle against hip bone). Those floors
+ * are deliberate: fifty bones share one ivory wedge, and chasing global
+ * separation pushes bone off ivory and muscle off red. A reader notices a
+ * lime-green rib far faster than two similar tans two ribs apart.
+ * `tests/anatomy.test.ts` pins all three numbers, so a retune that lowers them
+ * fails the suite instead of making this paragraph quietly wrong.
  */
 
 export interface AnatomyEntry {
@@ -79,8 +81,8 @@ function contralateral(c: RGB): RGB {
   ];
 }
 
-function clampByte(v: number): number {
-  return Math.max(0, Math.min(255, Math.round(v)));
+function mixByte(a: number, b: number, t: number): number {
+  return Math.round(a + (b - a) * t);
 }
 
 /** Emit `<stem>_left` / `<stem>_right`, deriving the right colour if not given. */
@@ -98,29 +100,23 @@ function pair(stem: string, name: string, left: RGB, right?: RGB): Def[] {
 // shades, which would put six identical vertebrae on screen together.
 
 /**
- * How far the last rung of a series drops below the LUT colour, and how far the
- * warm/cool tilt swings across the ramp. Twelve rungs separated by lightness
- * alone would need a drop of about half, running the last ribs down into a
- * brown that reads as a hole in the overlay rather than a label, so the ramp
- * moves along two axes at once and neither has to travel far.
+ * The two ends of a series ramp: the LUT colour, and the shade the last member
+ * reaches. The far end is darker and a little cooler, which is about as far as
+ * a ramp can travel and still read as bone, and it is long enough that twelve
+ * rungs stay apart. A single alternating step cannot do that job: it puts six
+ * identical vertebrae on one sagittal slice.
  */
-const SERIES_LIGHTNESS_SPAN = 0.26;
-const SERIES_WARMTH_SPAN = 0.34;
+type Ramp = readonly [from: RGB, to?: RGB];
 
 /** Colour for member `n` (0-based) of a `count`-long series. */
-function seriesShade(base: RGB, n: number, count: number): RGB {
-  if (count < 2) return base;
-  const p = rampPosition(n, count) / (count - 1);
-  const lightness = 1 - SERIES_LIGHTNESS_SPAN * p;
-  // The tilt rides on blue alone: pushing red or green instead would clip
-  // against 255 on the near-white cervical ivory and flatten the bright half of
-  // the ramp back into duplicates.
-  const warmth = 1 + SERIES_WARMTH_SPAN * (p - 0.5);
-  return [
-    clampByte(base[0] * lightness),
-    clampByte(base[1] * lightness),
-    clampByte(base[2] * lightness * warmth),
-  ];
+function seriesShade(ramp: Ramp, n: number, count: number): RGB {
+  const from = ramp[0];
+  const to = ramp[1] ?? from;
+  // Copied rather than handed back, so freezing the entry cannot freeze the
+  // literal this ramp was declared with.
+  if (count < 2) return [from[0], from[1], from[2]];
+  const t = rampPosition(n, count) / (count - 1);
+  return [mixByte(from[0], to[0], t), mixByte(from[1], to[1], t), mixByte(from[2], to[2], t)];
 }
 
 /**
@@ -134,39 +130,54 @@ function rampPosition(n: number, count: number): number {
   return n % 2 === 0 ? n / 2 : half + (n - 1) / 2;
 }
 
-const VERTEBRA_REGIONS: ReadonlyArray<readonly [prefix: string, count: number, color: RGB]> = [
-  ['C', 7, [255, 255, 207]], // Slicer cervical_vertebral_column
-  ['T', 12, [226, 202, 134]], // Slicer thoracic_vertebral_column
-  ['L', 5, [212, 188, 102]], // Slicer lumbar_vertebral_column
-  ['S', 1, [212, 208, 122]], // SlicerTotalSegmentator, S1 vertebra
+// Ramp ends were picked by maximising the smallest colour distance across the
+// whole table under the constraint that both ends stay osseous, since the
+// spine, the ribs and the girdles all crowd the same ivory wedge.
+const VERTEBRA_REGIONS: ReadonlyArray<readonly [prefix: string, count: number, ramp: Ramp]> = [
+  ['C', 7, [[255, 255, 207], [190, 190, 154]]], // Slicer cervical_vertebral_column
+  ['T', 12, [[226, 202, 134], [146, 130, 106]]], // Slicer thoracic_vertebral_column
+  ['L', 5, [[212, 188, 102], [157, 139, 76]]], // Slicer lumbar_vertebral_column
+  // One vertebra, so there is nothing to ramp across.
+  ['S', 1, [[212, 208, 122]]], // SlicerTotalSegmentator, S1 vertebra
 ];
 
 function vertebraDefs(): Def[] {
   const out: Def[] = [];
-  for (const [prefix, count, color] of VERTEBRA_REGIONS) {
+  for (const [prefix, count, ramp] of VERTEBRA_REGIONS) {
     for (let n = 1; n <= count; n++) {
-      const shade = seriesShade(color, n - 1, count);
+      const shade = seriesShade(ramp, n - 1, count);
       out.push([`vertebrae_${prefix}${n}`, `Vertebra ${prefix}${n}`, shade]);
     }
   }
   return out;
 }
 
-// RETUNED, warmed a shade off Slicer's 253,232,158 so that neither the base
-// nor its alternating shade lands on the thoracic vertebrae it sits beside.
-const RIB_COLOR: RGB = [252, 222, 176];
+// RETUNED, warmed a shade off Slicer's 253,232,158 so that the ramp it starts
+// clears the thoracic vertebrae the ribs sit beside.
+const RIB_RAMP: Ramp = [
+  [252, 222, 176],
+  [166, 138, 126],
+];
+
+/**
+ * The right side starts where `contralateral` puts it but is given its own far
+ * end. Taking a lightness step off a ramp that is already descending would
+ * leave the twelve right ribs sharing about half the room the left twelve get,
+ * and the closest of them would fall under a just-noticeable difference.
+ */
+const RIB_RAMP_RIGHT: Ramp = [contralateral(RIB_RAMP[0]), [108, 90, 90]];
 
 const RIBS_PER_SIDE = 12;
 
 function ribDefs(): Def[] {
   const out: Def[] = [];
-  const sides: ReadonlyArray<readonly [side: 'left' | 'right', color: RGB]> = [
-    ['left', RIB_COLOR],
-    ['right', contralateral(RIB_COLOR)],
+  const sides: ReadonlyArray<readonly [side: 'left' | 'right', ramp: Ramp]> = [
+    ['left', RIB_RAMP],
+    ['right', RIB_RAMP_RIGHT],
   ];
-  for (const [side, base] of sides) {
+  for (const [side, ramp] of sides) {
     for (let n = 1; n <= RIBS_PER_SIDE; n++) {
-      const shade = seriesShade(base, n - 1, RIBS_PER_SIDE);
+      const shade = seriesShade(ramp, n - 1, RIBS_PER_SIDE);
       out.push([`rib_${side}_${n}`, `Rib ${n} (${side})`, shade]);
     }
   }

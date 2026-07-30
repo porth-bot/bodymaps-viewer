@@ -17,6 +17,28 @@ const SAMPLE_KEYS = [
   'stomach',
 ] as const;
 
+/**
+ * The uniform series in the source LUT: one colour per group there, one colour
+ * per member here. The thoracic spine is the worst case at twelve members, and
+ * a sagittal slice puts all twelve on screen together.
+ */
+const BONY_SERIES: string[][] = [
+  Array.from({ length: 7 }, (_, i) => `vertebrae_C${i + 1}`),
+  Array.from({ length: 12 }, (_, i) => `vertebrae_T${i + 1}`),
+  Array.from({ length: 5 }, (_, i) => `vertebrae_L${i + 1}`),
+  Array.from({ length: 12 }, (_, i) => `rib_left_${i + 1}`),
+  Array.from({ length: 12 }, (_, i) => `rib_right_${i + 1}`),
+];
+
+/** Which series a key belongs to, or null for a structure that stands alone. */
+function seriesOf(key: string): string | null {
+  const vertebra = /^(vertebrae_[CTL])[0-9]+$/.exec(key);
+  if (vertebra) return vertebra[1];
+  const rib = /^(rib_(?:left|right))_[0-9]+$/.exec(key);
+  if (rib) return rib[1];
+  return null;
+}
+
 // --- colour distance -------------------------------------------------------
 // Overlay readability is a perceptual question, so the distinctness assertions
 // use CIE76 dE in CIELAB rather than raw RGB, which badly underrates how close
@@ -160,6 +182,54 @@ describe('autoWindow', () => {
       expect(Number.isFinite(wl.level)).toBe(true);
     }
   });
+
+  it('survives a finite range whose span overflows float64', () => {
+    // Both extrema are finite here, so the non-finite guard at the top does not
+    // fire, but `max - min` is Infinity. A file declaring FLOAT64 over a
+    // garbage payload yields extrema like the third pair, and the window still
+    // has to be a number the renderer can divide by.
+    const cases: Array<[number, number]> = [
+      [-Number.MAX_VALUE, Number.MAX_VALUE],
+      [-1e308, 1e308],
+      [-1.7877606696564347e308, 1.7570743700590801e308],
+    ];
+    for (const [min, max] of cases) {
+      const wl = autoWindow(min, max);
+      expect(Number.isFinite(wl.level), `${min}..${max} level`).toBe(true);
+      expect(Number.isFinite(wl.window), `${min}..${max} window`).toBe(true);
+      expect(wl.window, `${min}..${max} width`).toBeGreaterThan(0);
+      const [lo, hi] = windowToRange(wl);
+      expect(Number.isFinite(lo) && Number.isFinite(hi), `${min}..${max} range`).toBe(true);
+    }
+  });
+});
+
+describe('rangeToWindow is total', () => {
+  it('hands back a finite level and a positive finite width for any input', () => {
+    const cases: Array<[number, number]> = [
+      [NaN, 100],
+      [100, NaN],
+      [NaN, NaN],
+      [-Infinity, Infinity],
+      [0, Infinity],
+      // Finite endpoints that overflow one of the two arithmetic steps: the
+      // first pair overflows the subtraction, the other two the addition.
+      [-Number.MAX_VALUE, Number.MAX_VALUE],
+      [1e308, 1.5e308],
+      [-1e308, -1.5e308],
+    ];
+    for (const [lo, hi] of cases) {
+      const wl = rangeToWindow(lo, hi);
+      expect(Number.isFinite(wl.level), `${lo}..${hi} level`).toBe(true);
+      expect(Number.isFinite(wl.window), `${lo}..${hi} window`).toBe(true);
+      expect(wl.window, `${lo}..${hi} width`).toBeGreaterThan(0);
+    }
+  });
+
+  it('still reports the true centre of a range that only the width overflows', () => {
+    expect(rangeToWindow(1e308, 1.5e308).level).toBeCloseTo(1.25e308, -300);
+    expect(rangeToWindow(1e308, 1.5e308).window).toBeCloseTo(5e307, -300);
+  });
 });
 
 describe('lookupAnatomy', () => {
@@ -202,6 +272,64 @@ describe('lookupAnatomy', () => {
     expect(lookupAnatomy('oesophagus')).toBe(lookupAnatomy('esophagus'));
     expect(lookupAnatomy('adrenal left')).toBe(lookupAnatomy('adrenal_gland_left'));
     expect(lookupAnatomy('clavicle_right')).toBe(lookupAnatomy('clavicula_right'));
+  });
+
+  it('drops a file extension and a segmentation qualifier together', () => {
+    // Exporters write "<organ>_mask.nii.gz" and "<organ>_seg.nii". Each tail
+    // alone used to resolve while the combination that actually reaches disk
+    // fell through to the unknown palette.
+    const liver = lookupAnatomy('liver');
+    for (const name of [
+      'liver_mask',
+      'liver_seg',
+      'liver_mask.nii.gz',
+      'liver_seg.nii',
+      'liver_label.nii.gz',
+      'liver-mask.nii.gz',
+      'LIVER_MASK.NII.GZ',
+    ]) {
+      expect(lookupAnatomy(name), name).toBe(liver);
+    }
+    expect(lookupAnatomy('kidney_left_mask.nii.gz')).toBe(lookupAnatomy('kidney_left'));
+    expect(lookupAnatomy('left kidney seg.nii.gz')).toBe(lookupAnatomy('kidney_left'));
+  });
+
+  it('leaves a name that is nothing but a qualifier alone', () => {
+    // Stripping runs to a fixed point, so it has to stop before it eats the
+    // whole name and leaves an entry with no label.
+    for (const name of ['mask', 'seg', 'label', '_seg_', 'nii.gz']) {
+      const entry = lookupAnatomy(name);
+      expect(entry.key.length, name).toBeGreaterThan(0);
+      expect(entry.name.length, name).toBeGreaterThan(0);
+    }
+  });
+
+  it('treats a mask named after an Object.prototype member as unknown', () => {
+    // The lookup tables are keyed by strings out of a file name. On a plain
+    // object "constructor" resolves up the prototype chain and hands back a
+    // function, and the caller in labelmap.ts then reads .name off undefined.
+    for (const name of [
+      'constructor',
+      'CONSTRUCTOR',
+      'constructor.nii.gz',
+      '__proto__',
+      'toString',
+      'valueOf',
+      'hasOwnProperty',
+      'prototype',
+    ]) {
+      const entry = lookupAnatomy(name);
+      // Declared AnatomyEntry, so this assertion is about what actually comes
+      // back rather than about the type.
+      expect(entry, name).toBeDefined();
+      expect(typeof entry.name, name).toBe('string');
+      expect(entry.name.length, name).toBeGreaterThan(0);
+      expectValidColor(entry.color, name);
+      // Same access pattern as labelmap.ts building a Structure.
+      expect(() => ({ name: lookupAnatomy(name).name, color: lookupAnatomy(name).color })).not.toThrow();
+    }
+    expect(lookupAnatomy('constructor').name).toBe('Constructor');
+    expect(lookupAnatomy('constructor')).toBe(lookupAnatomy('Constructor'));
   });
 
   it('gives unknown keys a stable colour and a readable name', () => {
@@ -272,17 +400,79 @@ describe('anatomy colours', () => {
     // A rib cage or a lumbar spine rendered in one flat ivory reads as a single
     // region, so consecutive members have to differ even though the standard
     // LUT gives the whole series one colour.
-    const series: string[][] = [
-      ['C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'C7'].map((v) => `vertebrae_${v}`),
-      ['L1', 'L2', 'L3', 'L4', 'L5'].map((v) => `vertebrae_${v}`),
-      Array.from({ length: 12 }, (_, i) => `rib_left_${i + 1}`),
-      Array.from({ length: 12 }, (_, i) => `rib_right_${i + 1}`),
-    ];
-    for (const keys of series) {
+    for (const keys of BONY_SERIES) {
       for (let i = 1; i < keys.length; i++) {
         const gap = deltaE(ANATOMY[keys[i - 1]].color, ANATOMY[keys[i]].color);
-        expect(gap, `${keys[i - 1]} vs ${keys[i]}`).toBeGreaterThan(2.3);
+        expect(gap, `${keys[i - 1]} vs ${keys[i]}`).toBeGreaterThan(8);
       }
+    }
+  });
+
+  it('gives every member of a series its own rung, not one of two shades', () => {
+    // A sagittal slice shows a whole series at once. Comparing only
+    // consecutive members misses the case this guards: an alternating step
+    // makes T1, T3, T5, T7, T9 and T11 byte-identical while every neighbouring
+    // pair still looks fine.
+    for (const keys of BONY_SERIES) {
+      const distinct = new Set(keys.map((k) => ANATOMY[k].color.join(',')));
+      expect(distinct.size, `${keys[0]} series`).toBe(keys.length);
+      for (let i = 0; i < keys.length; i++) {
+        for (let j = i + 1; j < keys.length; j++) {
+          const gap = deltaE(ANATOMY[keys[i]].color, ANATOMY[keys[j]].color);
+          expect(gap, `${keys[i]} vs ${keys[j]}`).toBeGreaterThan(2.3);
+        }
+      }
+    }
+  });
+
+  it('holds the separation floors the file header claims', () => {
+    // The header quotes three numbers. They are asserted here so a retune that
+    // erodes them fails rather than making the header quietly wrong.
+    const entries = Object.entries(ANATOMY);
+    expect(entries.length).toBe(132);
+
+    let withinSeries = Infinity;
+    let withinSeriesPair = '';
+    let acrossStructures = Infinity;
+    let acrossStructuresPair = '';
+    let outsideSeries = Infinity;
+    let outsideSeriesPair = '';
+    for (let i = 0; i < entries.length; i++) {
+      for (let j = i + 1; j < entries.length; j++) {
+        const [keyA, a] = entries[i];
+        const [keyB, b] = entries[j];
+        const d = deltaE(a.color, b.color);
+        const seriesA = seriesOf(keyA);
+        const seriesB = seriesOf(keyB);
+        if (seriesA !== null && seriesA === seriesB) {
+          if (d < withinSeries) {
+            withinSeries = d;
+            withinSeriesPair = `${keyA} vs ${keyB}`;
+          }
+          continue;
+        }
+        if (d < acrossStructures) {
+          acrossStructures = d;
+          acrossStructuresPair = `${keyA} vs ${keyB}`;
+        }
+        if (seriesA === null && seriesB === null && d < outsideSeries) {
+          outsideSeries = d;
+          outsideSeriesPair = `${keyA} vs ${keyB}`;
+        }
+      }
+    }
+    expect(withinSeries, `closest rungs: ${withinSeriesPair}`).toBeGreaterThanOrEqual(2.75);
+    expect(acrossStructures, `closest structures: ${acrossStructuresPair}`).toBeGreaterThanOrEqual(3.05);
+    expect(outsideSeries, `closest off-ramp pair: ${outsideSeriesPair}`).toBeGreaterThanOrEqual(3.4);
+  });
+
+  it('never repeats a colour anywhere in the table', () => {
+    const seen = new Map<string, string>();
+    for (const [key, entry] of Object.entries(ANATOMY)) {
+      const color = entry.color.join(',');
+      const other = seen.get(color);
+      expect(other, `${key} shares ${color} with ${other}`).toBeUndefined();
+      seen.set(color, key);
     }
   });
 

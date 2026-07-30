@@ -24,8 +24,8 @@
  * hypothetical: the reference liver mask hits it seven times. So each cell is
  * partitioned into its surface components first (see `pairFaceCrossings`) and
  * emits one vertex per component. In the overwhelmingly common case there is
- * exactly one component and this costs nothing but the bookkeeping. With it,
- * all nine reference organ masks come out strictly manifold.
+ * exactly one component and this costs nothing but the bookkeeping. With it, all
+ * nine reference organ masks come out strictly manifold at the default blur.
  *
  * Known limit: one pathological case survives, where a single surface component
  * of a cell leaves and re-enters through the same ambiguous face. Splitting that
@@ -33,11 +33,13 @@
  * neighbouring cell across that face would not agree to, and the mesh would gain
  * a boundary instead. Properly fixing it means subdividing the cell, which is
  * what manifold dual contouring does and what this deliberately does not. It
- * needs field noise comparable to the voxel size to occur at all (never at full
- * resolution on the reference data, once on a stride-3 preview of a kidney), and
- * when it does the mesh is still closed and consistently oriented, so normals
- * and the divergence-theorem volume stay correct. Only the "exactly two
- * triangles per edge" property is lost, at that one edge.
+ * needs field detail comparable to the sample spacing to occur at all, so it is
+ * rare but not absent from the reference data: at the three blur passes the app
+ * runs it costs the liver exactly two edges out of 340k, and a stride-3 kidney
+ * preview one. When it happens the mesh is still closed and consistently
+ * oriented, so normals and the divergence-theorem volume stay correct (the liver
+ * still measures to within 0.3% of its voxel count). Only the "exactly two
+ * triangles per edge" property is lost, at those edges.
  *
  * COORDINATE CONTRACT: everything here works in "volume local millimetres",
  * defined as voxelIndex * spacing with the origin at voxel (0,0,0). The world
@@ -333,17 +335,20 @@ export function surfaceNets(input: SurfaceNetsInput): RawMesh {
       for (let i = 0; i < cnx; i++) {
         const slot = cellRow + i;
         const base = rowBase + i;
+        // Sign test only. Nearly every cell in a volume is discarded on the
+        // next line (97% of the reference liver crop), and filling `g` for
+        // those costs more than the whole rest of the pass: fl(a - b) > 0 is
+        // exactly a > b for doubles, so the comparison alone decides it.
         let mask = 0;
         for (let c = 0; c < 8; c++) {
-          const v = field[base + cornerOffset[c]] - isoValue;
-          g[c] = v;
-          if (v > 0) mask |= 1 << c;
+          if (field[base + cornerOffset[c]] > isoValue) mask |= 1 << c;
         }
         if (mask === 0 || mask === 255) {
           curBase[slot] = -1;
           curMap[slot] = 0;
           continue;
         }
+        for (let c = 0; c < 8; c++) g[c] = field[base + cornerOffset[c]] - isoValue;
 
         // Interpolate the crossings. Only surface cells reach this point, so
         // everything below scales with surface area, not with volume.
@@ -522,7 +527,11 @@ export function meshBounds(
 }
 
 export interface ExtractOrganMeshOptions {
-  /** Full-volume mask; any non-zero value counts as inside. */
+  /**
+   * Full-volume mask; any non-zero value inside `bounds` counts as inside.
+   * Voxels outside `bounds` are never read, so a scratch buffer shared between
+   * structures does not need clearing beyond the box it is filled with.
+   */
   mask: Uint8Array;
   dims: [number, number, number];
   spacing: [number, number, number];
@@ -533,6 +542,12 @@ export interface ExtractOrganMeshOptions {
   /** > 1 builds a coarse preview mesh from a downsampled field. */
   decimateStride?: number;
 }
+
+/** Inclusive voxel box [i0,j0,k0,i1,j1,k1]. */
+type Box = [number, number, number, number, number, number];
+
+/** Occupancy above this is inside. Fixed by the 0/1 nature of a mask. */
+const ISO_VALUE = 0.5;
 
 export interface OrganMesh {
   positions: Float32Array;
@@ -556,28 +571,50 @@ function emptyMesh(): OrganMesh {
 /**
  * Mask -> smooth closed triangle mesh, in volume local mm.
  *
- * The mask is cropped to its bounding box padded by two voxels (times the
+ * The mask is cropped to its bounding box padded by the blur radius (times the
  * decimation stride), converted to a Float32 occupancy field, blurred, run
  * through surface nets at 0.5, Taubin smoothed, and normalled. No welding step
  * is needed: surface nets already emits exactly one shared vertex per cell.
  *
- * The padding is what keeps the mesh closed. It is applied in field space and
- * samples outside the volume read as background rather than being clamped away,
- * because organ masks routinely touch the scan boundary (the liver in the
- * reference case starts at k = 0) and a clamped crop would leave the surface
- * open right there, breaking both manifoldness and any volume measurement.
+ * The padding is what keeps the mesh closed, so it has to be at least as wide as
+ * the blur reaches (one voxel per pass) or the blurred field is still above the
+ * isovalue at the array border and the surface runs off the edge of it. It is
+ * applied in field space and samples outside the volume read as background
+ * rather than being clamped away, because organ masks routinely touch the scan
+ * boundary (the liver in the reference case starts at k = 0) and a clamped crop
+ * would leave the surface open right there, breaking both manifoldness and any
+ * volume measurement.
+ *
+ * Nothing outside `bounds` is read. That is a contract, not an optimisation:
+ * callers hand over a mask buffer they share between structures, and a halo of
+ * whatever the previous structure left behind would be welded straight onto this
+ * mesh (the pancreas box has eleven thousand stomach voxels within two voxels of
+ * it).
  */
 export function extractOrganMesh(opts: ExtractOrganMeshOptions): OrganMesh {
   const { mask, dims, spacing, bounds } = opts;
-  const blurPasses = opts.blurPasses ?? 2;
+  const requestedPasses = Math.max(0, Math.round(opts.blurPasses ?? 2));
   const smoothIterations = opts.smoothIterations ?? 12;
   const stride = Math.max(1, Math.floor(opts.decimateStride ?? 1));
 
   const [nx, ny, nz] = dims;
+  const voxelCount = nx * ny * nz;
+  // Out-of-range reads on a typed array give undefined, and `undefined !== 0`
+  // is true, so a short mask would be meshed as solid tissue instead of
+  // failing. Catch it here rather than shipping fabricated anatomy.
+  if (mask.length < voxelCount) {
+    throw new Error(`extractOrganMesh: mask has ${mask.length} voxels, dims need ${voxelCount}`);
+  }
+
   const [i0, j0, k0, i1, j1, k1] = bounds;
   if (i1 < i0 || j1 < j0 || k1 < k0) return emptyMesh();
+  const clip: Box = [
+    Math.max(0, i0), Math.max(0, j0), Math.max(0, k0),
+    Math.min(nx - 1, i1), Math.min(ny - 1, j1), Math.min(nz - 1, k1),
+  ];
 
-  const pad = 2 * stride;
+  const blurPasses = blurPassesForStride(requestedPasses, stride);
+  const pad = Math.max(2, blurPasses) * stride;
   const lo: [number, number, number] = [i0 - pad, j0 - pad, k0 - pad];
   // Round the crop up to a whole number of stride blocks so the coarse grid is
   // exact; the slack lands inside the zero padding and costs nothing.
@@ -588,23 +625,35 @@ export function extractOrganMesh(opts: ExtractOrganMeshOptions): OrganMesh {
   ];
   if (coarse[0] < 2 || coarse[1] < 2 || coarse[2] < 2) return emptyMesh();
 
-  const field = sampleOccupancy(mask, nx, ny, nz, lo, coarse, stride);
-  const blurred = boxBlur3(field, coarse, blurPasses);
+  const field = sampleOccupancy(mask, dims, clip, lo, coarse, stride);
 
   // A coarse sample stands for the centre of its stride block, so the field
   // origin shifts by half a block. With stride 1 this is exactly `lo`.
   const half = (stride - 1) / 2;
-  const raw = surfaceNets({
-    field: blurred,
-    dims: coarse,
-    spacing: [spacing[0] * stride, spacing[1] * stride, spacing[2] * stride],
-    isoValue: 0.5,
-    origin: [
-      (lo[0] + half) / stride,
-      (lo[1] + half) / stride,
-      (lo[2] + half) / stride,
-    ],
-  });
+  const meshAtBlur = (passes: number): RawMesh =>
+    surfaceNets({
+      field: boxBlur3(field, coarse, passes),
+      dims: coarse,
+      spacing: [spacing[0] * stride, spacing[1] * stride, spacing[2] * stride],
+      isoValue: ISO_VALUE,
+      origin: [
+        (lo[0] + half) / stride,
+        (lo[1] + half) / stride,
+        (lo[2] + half) / stride,
+      ],
+    });
+
+  let raw = meshAtBlur(blurPasses);
+  // The blur runs before the threshold, so a structure thinner than about
+  // 2 * blurPasses voxels never reaches the isovalue anywhere and comes back as
+  // an empty mesh the caller cannot tell from an empty mask. Back the blur off
+  // until a surface appears: a blocky adrenal gland beats a missing one.
+  if (raw.indices.length === 0 && blurPasses > 0 && maxSample(field) > ISO_VALUE) {
+    for (let passes = blurPasses - 1; passes >= 0; passes--) {
+      raw = meshAtBlur(passes);
+      if (raw.indices.length > 0) break;
+    }
+  }
   if (raw.indices.length === 0) return emptyMesh();
 
   const positions = taubinSmooth(raw.positions, raw.indices, smoothIterations);
@@ -618,6 +667,31 @@ export function extractOrganMesh(opts: ExtractOrganMeshOptions): OrganMesh {
 }
 
 /**
+ * Blur passes to run on a stride-`s` grid so the smoothing matches what
+ * `passes` would do at full resolution.
+ *
+ * One radius-1 box pass has variance 2/3 in grid units, which is (2/3)s^2 whole
+ * voxels, and the s^3 block average already contributes (s^2 - 1)/12 by itself.
+ * Holding the total where full resolution puts it is what keeps a preview the
+ * size of the mesh it stands in for: the 0.5 crossing of a blurred field moves
+ * inward on a convex boundary in proportion to the blur variance, so keeping the
+ * pass count fixed instead cost the gall bladder 80% of its volume at stride 4
+ * where the decimation alone costs 17%. At stride 1 this returns `passes`.
+ */
+function blurPassesForStride(passes: number, stride: number): number {
+  const perPass = (2 / 3) * stride * stride;
+  const fromBlocks = (stride * stride - 1) / 12;
+  return Math.max(0, Math.round(((2 / 3) * passes - fromBlocks) / perPass));
+}
+
+/** Largest sample in a field, for deciding whether anything was there at all. */
+function maxSample(field: Float32Array): number {
+  let max = -Infinity;
+  for (let i = 0; i < field.length; i++) if (field[i] > max) max = field[i];
+  return max;
+}
+
+/**
  * Crop the mask into a Float32 occupancy field, averaging each stride^3 block.
  *
  * Block averaging rather than point sampling for the decimated case: a binary
@@ -626,47 +700,115 @@ export function extractOrganMesh(opts: ExtractOrganMeshOptions): OrganMesh {
  * blocky noise. The average costs one pass over the crop, which is the cheap
  * part next to blurring and meshing.
  *
- * Samples outside the volume are background, which is what guarantees the
- * zero border the isosurface needs to close.
+ * Voxels outside the volume and voxels outside `clip` both read as background:
+ * the first is what guarantees the zero border the isosurface needs to close,
+ * the second is what keeps a shared mask buffer's leftovers out of the mesh.
  */
 function sampleOccupancy(
   mask: Uint8Array,
-  nx: number,
-  ny: number,
-  nz: number,
+  dims: [number, number, number],
+  clip: Box,
   lo: [number, number, number],
   coarse: [number, number, number],
   stride: number,
 ): Float32Array {
+  return stride === 1
+    ? cropOccupancy(mask, dims, clip, lo, coarse)
+    : blockOccupancy(mask, dims, clip, lo, coarse, stride);
+}
+
+/**
+ * Full-resolution crop: one sample per voxel, so the whole job is copying the
+ * clipped box into the middle of a zeroed field. Walking the source box rather
+ * than the destination grid keeps the padding out of the loop entirely.
+ */
+function cropOccupancy(
+  mask: Uint8Array,
+  dims: [number, number, number],
+  clip: Box,
+  lo: [number, number, number],
+  coarse: [number, number, number],
+): Float32Array {
+  const [nx, ny] = dims;
   const [cnx, cny, cnz] = coarse;
   const field = new Float32Array(cnx * cny * cnz);
-  const invBlock = 1 / (stride * stride * stride);
-  const strideZ = nx * ny;
+  const [ci0, cj0, ck0, ci1, cj1, ck1] = clip;
+  if (ci1 < ci0 || cj1 < cj0 || ck1 < ck0) return field;
 
+  const planeStride = nx * ny;
+  const x0 = Math.max(ci0, lo[0]);
+  const x1 = Math.min(ci1, lo[0] + cnx - 1);
+  const z1 = Math.min(ck1, lo[2] + cnz - 1);
+  const y1 = Math.min(cj1, lo[1] + cny - 1);
+
+  for (let z = Math.max(ck0, lo[2]); z <= z1; z++) {
+    const outZ = (z - lo[2]) * cny;
+    for (let y = Math.max(cj0, lo[1]); y <= y1; y++) {
+      const src = z * planeStride + y * nx;
+      const out = (outZ + y - lo[1]) * cnx - lo[0];
+      for (let x = x0; x <= x1; x++) {
+        if (mask[src + x] !== 0) field[out + x] = 1;
+      }
+    }
+  }
+  return field;
+}
+
+/** Decimated crop: each sample is the mean of its stride^3 block. */
+function blockOccupancy(
+  mask: Uint8Array,
+  dims: [number, number, number],
+  clip: Box,
+  lo: [number, number, number],
+  coarse: [number, number, number],
+  stride: number,
+): Float32Array {
+  const [nx, ny] = dims;
+  const [cnx, cny, cnz] = coarse;
+  const field = new Float32Array(cnx * cny * cnz);
+  const [ci0, cj0, ck0, ci1, cj1, ck1] = clip;
+  if (ci1 < ci0 || cj1 < cj0 || ck1 < ck0) return field;
+
+  const planeStride = nx * ny;
+  const invBlock = 1 / (stride * stride * stride);
+
+  // A column's span of source voxels depends only on cx, so the clamping runs
+  // once per column instead of once per sample of every row.
+  const colStart = new Int32Array(cnx);
+  const colCount = new Int32Array(cnx);
+  for (let cx = 0; cx < cnx; cx++) {
+    const first = Math.max(lo[0] + cx * stride, ci0);
+    const last = Math.min(lo[0] + cx * stride + stride - 1, ci1);
+    colStart[cx] = first;
+    colCount[cx] = Math.max(0, last - first + 1);
+  }
+
+  const rowSums = new Int32Array(cnx);
   for (let cz = 0; cz < cnz; cz++) {
-    const zBase = lo[2] + cz * stride;
+    const z0 = Math.max(lo[2] + cz * stride, ck0);
+    const z1 = Math.min(lo[2] + cz * stride + stride - 1, ck1);
+    if (z1 < z0) continue;
     for (let cy = 0; cy < cny; cy++) {
-      const yBase = lo[1] + cy * stride;
-      const out = (cz * cny + cy) * cnx;
-      for (let cx = 0; cx < cnx; cx++) {
-        const xBase = lo[0] + cx * stride;
-        let sum = 0;
-        for (let dz = 0; dz < stride; dz++) {
-          const z = zBase + dz;
-          if (z < 0 || z >= nz) continue;
-          for (let dy = 0; dy < stride; dy++) {
-            const y = yBase + dy;
-            if (y < 0 || y >= ny) continue;
-            const rowBase = z * strideZ + y * nx;
-            const xStart = Math.max(0, -xBase);
-            const xEnd = Math.min(stride, nx - xBase);
-            for (let dx = xStart; dx < xEnd; dx++) {
-              if (mask[rowBase + xBase + dx] !== 0) sum++;
+      const y0 = Math.max(lo[1] + cy * stride, cj0);
+      const y1 = Math.min(lo[1] + cy * stride + stride - 1, cj1);
+      if (y1 < y0) continue;
+      rowSums.fill(0);
+      for (let z = z0; z <= z1; z++) {
+        for (let y = y0; y <= y1; y++) {
+          const rowBase = z * planeStride + y * nx;
+          for (let cx = 0; cx < cnx; cx++) {
+            const start = rowBase + colStart[cx];
+            const count = colCount[cx];
+            let sum = 0;
+            for (let d = 0; d < count; d++) {
+              if (mask[start + d] !== 0) sum++;
             }
+            rowSums[cx] += sum;
           }
         }
-        field[out + cx] = sum * invBlock;
       }
+      const out = (cz * cny + cy) * cnx;
+      for (let cx = 0; cx < cnx; cx++) field[out + cx] = rowSums[cx] * invBlock;
     }
   }
   return field;

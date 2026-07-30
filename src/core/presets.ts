@@ -72,12 +72,27 @@ export function windowToRange(wl: WindowLevel): [number, number] {
 
 /**
  * Inverse of `windowToRange`. Accepts the bounds in either order so a
- * drag-to-window interaction can pass raw start/end values.
+ * drag-to-window interaction can pass raw start/end values, and always returns
+ * a finite level and a positive finite width, because everything downstream
+ * divides by that width.
  */
 export function rangeToWindow(lo: number, hi: number): WindowLevel {
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) {
+    return { level: 0, window: FALLBACK_WINDOW };
+  }
   const low = Math.min(lo, hi);
   const high = Math.max(lo, hi);
-  return { level: (low + high) / 2, window: Math.max(high - low, MIN_WINDOW) };
+  // Each bound is halved before summing: `low + high` overflows to Infinity for
+  // finite endpoints near the float64 limit, and halving afterwards would keep
+  // it there. Both forms are exact in binary floating point everywhere else.
+  const level = low / 2 + high / 2;
+  const width = high - low;
+  // The subtraction can overflow where the sum does not, and Math.max would
+  // then propagate the resulting NaN straight past the MIN_WINDOW floor. There
+  // is no honest window for a range that wide, so it takes the same answer as
+  // an uninterpretable one.
+  if (!Number.isFinite(width)) return { level, window: FALLBACK_WINDOW };
+  return { level, window: Math.max(width, MIN_WINDOW) };
 }
 
 /**
@@ -105,6 +120,11 @@ export function autoWindow(
   const high = Math.max(min, max);
   const span = high - low;
   if (span <= 0) return { level: low, window: MIN_WINDOW };
+  // A pair of finite extrema can still span more than float64 can subtract, and
+  // the trim below would then put both bounds at Infinity. There is nothing to
+  // trim off a range that wide, so it goes through untrimmed and rangeToWindow
+  // decides what a window over it means.
+  if (!Number.isFinite(span)) return rangeToWindow(low, high);
 
   let fracLow = clamp01(percentileLow, 0);
   let fracHigh = clamp01(percentileHigh, 1);

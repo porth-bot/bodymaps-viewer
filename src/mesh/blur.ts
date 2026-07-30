@@ -17,9 +17,13 @@
  * Blur `field` without modifying it.
  *
  * One "pass" is a full x, then y, then z sweep with a radius-1 box (the
- * [1,1,1]/3 kernel), border-clamped. Two passes (the default) give an effective
- * support radius of 2 voxels, which is what callers pad their crop by so the
- * blurred field is guaranteed below the 0.5 isovalue at the array border.
+ * [1,1,1]/3 kernel), border-clamped. So `passes` passes have an effective
+ * support radius of `passes` voxels, and a caller who needs the blurred field to
+ * stay below the 0.5 isovalue at the array border (which is what makes the
+ * extracted isosurface closed) has to pad its crop by at least that much. Two
+ * voxels of padding, the old fixed figure, silently stops being enough somewhere
+ * past ten passes: border clamping reflects a solid region back into the border,
+ * so the value there climbs toward 0.5 rather than decaying to zero.
  *
  * Allocation is exactly two scratch volumes regardless of `passes`: the sweeps
  * ping-pong between them and no per-row temporary is ever created.

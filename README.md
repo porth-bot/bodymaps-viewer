@@ -142,7 +142,16 @@ pipeline: gunzip, parse, rescale, reorient to RAS, then accumulate.
 | Aorta | 29.3 mL | 29.3 mL | 143 | 142.5 |
 | Gallbladder | 16.8 mL | 16.8 mL | 18 | 18.5 |
 
-Orientation was verified from the anatomy rather than trusting the header. The
+Orientation handling was checked end to end rather than only in unit tests. The
+sample case was rewritten into LPS with `nibabel` (flipping the i and j axes and
+updating the affine so every voxel still maps to the same patient location),
+then loaded through the app's own file input. The viewer reported the source as
+LPS, resampled it, and recovered every structure centroid to the digit: the
+liver came back at (344.2, 200.3, 35.2) in RAS voxel order, having sat at
+(156.8, 146.7, 35.2) in the LPS array, and the rendered axial slice was
+identical to the original. Volumes and mean attenuation were unchanged.
+
+Orientation was also verified from the anatomy rather than trusting the header. The
 liver centroid sits at i = 344 and the spleen at i = 149, so increasing i runs
 toward the patient's right; the liver sits superior to the kidneys, so k runs
 superior; the gallbladder is anterior to the aorta, so j runs anterior. The
