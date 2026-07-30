@@ -347,8 +347,10 @@ export class Interactions {
 
     let handled = true;
     switch (e.key) {
-      case 'ArrowUp': case 'PageUp': this.stepSlice(hover, 1); break;
-      case 'ArrowDown': case 'PageDown': this.stepSlice(hover, -1); break;
+      // All four arrows take the Shift jump. Only the horizontal pair used to,
+      // which made the documented "Shift for 10" false half the time.
+      case 'ArrowUp': case 'PageUp': this.stepSlice(hover, e.shiftKey ? 10 : 1); break;
+      case 'ArrowDown': case 'PageDown': this.stepSlice(hover, e.shiftKey ? -10 : -1); break;
       case 'ArrowRight': this.stepSlice(hover, e.shiftKey ? 10 : 1); break;
       case 'ArrowLeft': this.stepSlice(hover, e.shiftKey ? -10 : -1); break;
 

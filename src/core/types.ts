@@ -64,6 +64,8 @@ export interface NiftiHeader {
   affine: Mat4;
   /** Which of the three methods produced `affine`. Useful for the info panel. */
   affineSource: 'sform' | 'qform' | 'pixdim';
+  /** 3D volumes in the file. Above 1 means a 4D series; only the first is read. */
+  volumeCount: number;
 }
 
 /** A parsed NIfTI file, still in its own native voxel order. */
@@ -93,6 +95,12 @@ export interface Volume {
   affine: Mat4;
   /** Orientation of the ORIGINAL file, kept for display ("loaded as LPS"). */
   originalAxCodes: AxCodes;
+  /**
+   * How many 3D volumes the file held. More than one means a 4D series (a
+   * time course, or diffusion directions) of which only the first is loaded.
+   * The UI says so rather than letting the other frames disappear silently.
+   */
+  volumeCount: number;
   values: TypedNumberArray;
   slope: number;
   intercept: number;

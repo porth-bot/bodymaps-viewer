@@ -321,7 +321,6 @@ uniform int   u_mode;          // 0 = composite, 1 = MIP, 2 = isosurface-lit com
 uniform float u_density;
 uniform int   u_shade;
 uniform float u_labelBoost;    // extra opacity for annotated structures
-uniform float u_labelTint;     // 0 when the segmentation overlay is switched off
 uniform sampler2D u_sceneColor;
 uniform sampler2D u_sceneDepth;
 uniform vec2  u_near_far;
@@ -423,6 +422,10 @@ void main() {
 
     uint lbl = labelAt(uvw);
     vec4 lc = lbl > 0u ? lutLookup(lbl) : vec4(0.0);
+    // Fold the global overlay gate into the per-structure alpha, so switching
+    // structures off (or setting overlay opacity to zero) skips the whole
+    // block rather than leaving the volume tinted in structure colours.
+    float labelAlpha = lc.a * u_labelStyle.x;
 
     // Opacity ramp.
     //
@@ -438,12 +441,9 @@ void main() {
     float a = g2 * g2 * u_density;
     vec3 c = tissueColor(g);
 
-    if (lc.a > 0.0) {
-      // The tint needs its own gate. Keying it off u_labelBoost alone left the
-      // volume painted in structure colours after the overlay was switched
-      // off, because the boost only controls added opacity, not colour.
-      c = mix(c, lc.rgb, 0.85 * u_labelTint);
-      a = max(a, lc.a * u_labelBoost);
+    if (labelAlpha > 0.0) {
+      c = mix(c, lc.rgb, 0.85);
+      a = max(a, labelAlpha * u_labelBoost);
     }
 
     if (a > 0.001) {

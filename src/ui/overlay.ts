@@ -266,10 +266,10 @@ export class Overlay {
     if (state.showSlicesIn3D) bits.push('slices');
     ctx.fillText(bits.join(' + ') || 'empty', 8, 22);
 
-    const ms = renderer.frameTimeMs;
+    const ms = renderer.cpuFrameMs;
     if (ms > 0) {
       ctx.textAlign = 'right';
-      ctx.fillText(`${ms.toFixed(1)} ms  ${(1000 / Math.max(ms, 0.01)).toFixed(0)} fps`, rect.width - 8, 8);
+      ctx.fillText(`${ms.toFixed(1)} ms CPU`, rect.width - 8, 8);
     }
 
     this.drawAxisGizmo(camera, rect);

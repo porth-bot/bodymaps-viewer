@@ -22,6 +22,7 @@ function makeReference(spacing: [number, number, number] = [1, 1, 1]): Volume {
     spacing,
     affine,
     originalAxCodes: ['R', 'A', 'S'],
+    volumeCount: 1,
     values,
     slope: 1,
     intercept: 0,

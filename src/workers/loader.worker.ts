@@ -57,6 +57,18 @@ async function loadVolume(src: LoadSource): Promise<Volume> {
   return reorientToRAS(parseNifti(plain));
 }
 
+/**
+ * Name the file in the error.
+ *
+ * Parser and gunzip failures say what went wrong but not what it went wrong
+ * on, so a case with a dozen structures reported "unexpected EOF" with no way
+ * to tell which file to look at.
+ */
+function blame(key: string, err: unknown): Error {
+  const message = err instanceof Error ? err.message : String(err);
+  return new Error(`${key}: ${message}`);
+}
+
 ctx.onmessage = async (event: MessageEvent<LoadRequest>) => {
   const req = event.data;
   if (req.type !== 'load') return;
@@ -66,7 +78,12 @@ ctx.onmessage = async (event: MessageEvent<LoadRequest>) => {
     const tStart = performance.now();
     post({ type: 'progress', token, stage: 'Downloading scan', fraction: 0, detail: req.ct.key });
 
-    const volume = await loadVolume(req.ct);
+    let volume: Volume;
+    try {
+      volume = await loadVolume(req.ct);
+    } catch (err) {
+      throw blame(req.ct.file?.name ?? req.ct.url ?? req.ct.key, err);
+    }
     const normalized = normalizeForGpu(volume);
     const volumeMs = performance.now() - tStart;
 
@@ -106,13 +123,17 @@ ctx.onmessage = async (event: MessageEvent<LoadRequest>) => {
         fraction: 0.7 + 0.25 * (i / buffers.length),
         detail: key,
       });
-      const plain = await gunzipIfNeeded(buf);
-      const image = parseNifti(plain);
-      // One file can describe one structure or many. TotalSegmentator's default
-      // output is a single combined map holding values 1..N, and AbdomenAtlas
-      // ships both layouts, so which one this is has to be decided from the
-      // data rather than from the filename.
-      masks.push(...expandMaskFile(key, reorientLike(image, volume), undefined));
+      try {
+        const plain = await gunzipIfNeeded(buf);
+        const image = parseNifti(plain);
+        // One file can describe one structure or many. TotalSegmentator's
+        // default output is a single combined map holding values 1..N, and
+        // AbdomenAtlas ships both layouts, so which one this is has to be
+        // decided from the data rather than from the filename.
+        masks.push(...expandMaskFile(key, reorientLike(image, volume), undefined));
+      } catch (err) {
+        throw blame(key, err);
+      }
       if (masks.length > 255) {
         throw new Error(
           `This case describes more than 255 structures, which is more than a ` +

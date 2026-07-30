@@ -83,11 +83,18 @@ function buildCasePanel(deps: PanelDeps, updaters: Array<(s: AppState) => void>)
       ['Voxel size', `${v.spacing.map((x) => x.toFixed(3)).join(' x ')} mm`],
       ['Field of view', `${v.extent.map((x) => Math.round(x)).join(' x ')} mm`],
       ['Value range', `${Math.round(v.min)} to ${Math.round(v.max)} HU`],
+      // "Reoriented", not "resampled": the transform is a permutation and a
+      // set of flips, so voxel values are moved but never interpolated.
       ['Stored as', describeAxCodes(v.originalAxCodes) === 'RAS'
         ? 'RAS (native)'
-        : `${describeAxCodes(v.originalAxCodes)}, resampled to RAS`],
+        : `${describeAxCodes(v.originalAxCodes)}, reoriented to RAS`],
       ['Voxels', formatCount(v.dims[0] * v.dims[1] * v.dims[2])],
     ];
+    if (v.volumeCount > 1) {
+      // A 4D series loads its first frame. Saying so beats letting a reader
+      // wonder where the other frames went.
+      rows.push(['4D series', `frame 1 of ${v.volumeCount}`]);
+    }
     if (s.labels) {
       rows.push(['Structures', String(s.labels.structures.length)]);
       if (s.labels.overlapVoxels > 0) {

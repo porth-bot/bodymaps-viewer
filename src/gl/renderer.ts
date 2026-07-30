@@ -267,8 +267,17 @@ export class Renderer {
     return true;
   }
 
-  /** Average frame time over the recent window, in milliseconds. */
-  get frameTimeMs(): number {
+  /**
+   * Average CPU time spent building a frame, in milliseconds.
+   *
+   * This is submit time, not GPU time. GL calls return as soon as the command
+   * is queued, so this measures how long the main thread is busy, which is
+   * what determines whether the UI stays responsive. It is not the frame rate
+   * and must not be reported as one: on a fast GPU it undercounts, and on a
+   * slow one the driver blocks and it overcounts. Real GPU timing needs
+   * EXT_disjoint_timer_query_webgl2, which is unavailable in most browsers.
+   */
+  get cpuFrameMs(): number {
     if (this.frameTimes.length === 0) return 0;
     return this.frameTimes.reduce((a, b) => a + b, 0) / this.frameTimes.length;
   }
@@ -461,7 +470,6 @@ export class Renderer {
       gl.uniform1f(prog.uniforms['u_density'] ?? null, state.volumeDensity);
       gl.uniform1i(prog.uniforms['u_shade'] ?? null, state.volumeShade ? 1 : 0);
       gl.uniform1f(prog.uniforms['u_labelBoost'] ?? null, state.showLabels ? state.volumeLabelBoost : 0);
-      gl.uniform1f(prog.uniforms['u_labelTint'] ?? null, state.showLabels && this.labelTex ? 1 : 0);
       const [near, far] = state.camera.nearFar();
       gl.uniform2f(prog.uniforms['u_near_far'] ?? null, near, far);
 

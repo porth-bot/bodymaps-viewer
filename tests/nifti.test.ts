@@ -966,3 +966,66 @@ describe('real BDMAP_00000338 CT', () => {
     }
   });
 });
+
+describe('4D and higher rank files', () => {
+  /**
+   * Rewrite a synthesised 3D header to declare extra non-spatial dimensions.
+   * The voxel block is left as is, so the file genuinely holds only the first
+   * frame, which is what makes the past-the-end guard observable.
+   */
+  function declareRank(buffer: ArrayBuffer, rank: number, sizes: number[]): ArrayBuffer {
+    const view = new DataView(buffer);
+    view.setInt16(40, rank, true);
+    sizes.forEach((n, i) => view.setInt16(40 + (4 + i) * 2, n, true));
+    return buffer;
+  }
+
+  it('reads the first frame of a 4D series and reports how many there are', () => {
+    const dims: [number, number, number] = [4, 3, 2];
+    const perFrame = 24;
+    // Two frames of data so the parser is not merely stopped by the buffer end.
+    const buffer = synthNifti1({
+      dims,
+      datatype: NiftiDataType.INT16,
+      values: ramp(perFrame * 2),
+    });
+    const image = parseNifti(declareRank(buffer, 4, [2]));
+
+    expect(image.header.volumeCount).toBe(2);
+    expect(image.header.dim[0]).toBe(4);
+    // Only the spatial extent is loaded, and it is frame one.
+    expect(image.data.length).toBe(perFrame);
+    expect([...image.data.slice(0, 4)]).toEqual([0, 1, 2, 3]);
+  });
+
+  it('multiplies the non-spatial sizes for rank above 4', () => {
+    const dims: [number, number, number] = [2, 2, 2];
+    const buffer = synthNifti1({
+      dims,
+      datatype: NiftiDataType.INT16,
+      values: ramp(8 * 6),
+    });
+    const image = parseNifti(declareRank(buffer, 5, [3, 2]));
+    expect(image.header.volumeCount).toBe(6);
+    expect(image.data.length).toBe(8);
+  });
+
+  it('reports a single volume for an ordinary 3D file', () => {
+    const image = parseNifti(
+      synthNifti1({ dims: [3, 3, 3], datatype: NiftiDataType.INT16, values: ramp(27) }),
+    );
+    expect(image.header.volumeCount).toBe(1);
+  });
+
+  it('treats a size of 1 on a non-spatial axis as a single volume', () => {
+    // dim[0] = 4 with dim[4] = 1 is how plenty of writers spell a plain 3D
+    // volume, and calling that a 4D series would put a misleading line in the
+    // info panel on ordinary files.
+    const buffer = synthNifti1({
+      dims: [3, 3, 3],
+      datatype: NiftiDataType.INT16,
+      values: ramp(27),
+    });
+    expect(parseNifti(declareRank(buffer, 4, [1])).header.volumeCount).toBe(1);
+  });
+});

@@ -75,6 +75,7 @@ function makeImage(
       intentName: '',
       affine,
       affineSource: 'sform',
+    volumeCount: 1,
     },
     data,
   };

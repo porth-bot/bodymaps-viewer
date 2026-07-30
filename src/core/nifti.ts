@@ -396,6 +396,9 @@ export function parseNiftiHeader(buffer: ArrayBuffer): NiftiHeader {
   return {
     version,
     littleEndian,
+    // Filled in by parseNifti once the rank has been validated; a bare header
+    // read has no reason to care how many frames follow it.
+    volumeCount: 1,
     dim: raw.dim,
     datatype: raw.datatype as NiftiDataType,
     bitpix: raw.bitpix,
@@ -459,6 +462,24 @@ function spatialDims(header: NiftiHeader): [number, number, number] {
   return sizes;
 }
 
+/**
+ * How many 3D volumes the file stores, from the non-spatial dimensions.
+ *
+ * A 4D file is a time course or a diffusion series. Only the first volume is
+ * read, which is the right default for a viewer, but the count is reported so
+ * the UI can say so instead of silently dropping the rest.
+ */
+function storedVolumeCount(header: NiftiHeader): number {
+  const rank = header.dim[0];
+  if (!Number.isInteger(rank) || rank < 4 || rank > 7) return 1;
+  let n = 1;
+  for (let axis = 4; axis <= rank; axis++) {
+    const size = header.dim[axis];
+    if (Number.isInteger(size) && size > 1) n *= size;
+  }
+  return n;
+}
+
 export function parseNifti(buffer: ArrayBuffer): NiftiImage {
   const header = parseNiftiHeader(buffer);
   const info = DATA_TYPES[header.datatype];
@@ -466,6 +487,7 @@ export function parseNifti(buffer: ArrayBuffer): NiftiImage {
 
   const [nx, ny, nz] = spatialDims(header);
   const count = nx * ny * nz;
+  header.volumeCount = storedVolumeCount(header);
 
   const defaultOffset = header.version === 1 ? NIFTI1_DEFAULT_DATA_OFFSET : NIFTI2_DEFAULT_DATA_OFFSET;
   const dataOffset = header.voxOffset > 0 ? header.voxOffset : defaultOffset;

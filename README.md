@@ -165,7 +165,7 @@ superior; the gallbladder is anterior to the aorta, so j runs anterior. The
 aorta is left of the inferior vena cava in the rendered axial view, which is the
 check that catches a left/right flip.
 
-The 182 tests in `tests/` cover the parser against synthesised NIfTI files in
+The 186 tests in `tests/` cover the parser against synthesised NIfTI files in
 both endiannesses, the quaternion affine path, the RAS resampling (asserting
 that `affine_new * voxel_new == affine_old * voxel_old`), and the mesher. Mesh
 tests assert closedness and manifoldness by checking every undirected edge is
@@ -185,8 +185,16 @@ the files served locally, so they are the parsing cost rather than the network.
 | Read, gunzip, parse, reorient and normalise the scan | 106 ms |
 | Read nine masks, reorient them and pack the label volume | 253 ms |
 | Extract, smooth and upload nine surfaces | 851 ms |
-| Frame time, three slice views | 3.2 ms |
-| Frame time, four up with volume rendering | 8 to 14 ms |
+| Main-thread time per frame, three slice views | 3.2 ms |
+| Main-thread time per frame, four up with volume rendering | 8 to 14 ms |
+
+The two per-frame figures are CPU submit time, which is what the readout in
+the corner of the 3D pane reports and labels as such. GL calls return once the
+command is queued, so this measures how long the main thread is busy, not how
+long the GPU takes. It is the number that decides whether the UI stays
+responsive, and it is deliberately not dressed up as a frame rate: honest GPU
+timing needs `EXT_disjoint_timer_query_webgl2`, which most browsers do not
+expose.
 
 Surface extraction alone is 283 ms of CPU for all nine organs, measured
 separately in the test suite; the rest is worker startup and buffer transfer.
@@ -213,7 +221,7 @@ npm run dev
 Then open http://localhost:5173. The sample case loads on its own.
 
 ```bash
-npm test          # 182 tests, including integration against the real case
+npm test          # 186 tests, including integration against the real case
 npm run typecheck
 npm run build
 ```

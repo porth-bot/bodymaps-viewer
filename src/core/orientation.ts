@@ -199,6 +199,7 @@ export function reorientToRAS(image: NiftiImage): Volume {
     spacing,
     affine: plan.affine,
     originalAxCodes: plan.axCodes,
+    volumeCount: image.header.volumeCount,
     values,
     slope,
     intercept,

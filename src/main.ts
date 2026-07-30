@@ -372,8 +372,8 @@ function updateStatusBar(state: AppState, renderer: Renderer): void {
       bits.push(`${state.volume.spacing.map((s) => s.toFixed(2)).join(' x ')} mm`);
     }
     if (renderer.meshCount > 0) bits.push(`${renderer.meshCount} surfaces`);
-    const ms = renderer.frameTimeMs;
-    if (ms > 0) bits.push(`${ms.toFixed(1)} ms/frame`);
+    const ms = renderer.cpuFrameMs;
+    if (ms > 0) bits.push(`${ms.toFixed(1)} ms CPU/frame`);
     right.textContent = bits.join('   |   ');
   }
 }
